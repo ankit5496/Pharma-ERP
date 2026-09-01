@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "Pharma ERP NestJS app",
+  "extends": "./base.json",
+  "compilerOptions": {
+    // NestJS's DI relies on decorator metadata emitted by the legacy decorator
+    // transform, so `experimentalDecorators` + `emitDecoratorMetadata` are
+    // mandatory here and must not be swapped for TC39 decorators.
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "isolatedModules": false,
+    "outDir": "dist",
+    "baseUrl": ".",
+    // class-validator's optional-property DTO pattern trips this rule; the
+    // stricter `strictNullChecks` already covers the real risk.
+    "strictPropertyInitialization": false
+  }
+}

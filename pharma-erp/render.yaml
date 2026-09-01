@@ -1,0 +1,122 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Creates three resources: a Postgres database, the NestJS API, and the Next.js
+# web app. Deploy with Render → New → Blueprint, pointed at this repository.
+#
+# BEFORE the first deploy succeeds you must do two manual things — see
+# "Deploying to Render" in the README for the walkthrough:
+#
+#   1. Run scripts/render-bootstrap.sql against the new database. It creates the
+#      least-privilege `pharma_app` role that the API connects as. Without it,
+#      DATABASE_URL has nothing to point at.
+#   2. Fill in the secrets marked `sync: false` below (Clerk keys, and the
+#      pharma_app connection string). Render deliberately will not let a
+#      blueprint carry secrets.
+#
+# Why DATABASE_URL is not wired with `fromDatabase`: Render's generated
+# connection string is for the database OWNER. The API must connect as a
+# non-owner, non-superuser role or PostgreSQL row-level security does not apply
+# to it — which is the whole basis of tenant isolation here. The owner URL is
+# used for MIGRATION_DATABASE_URL only.
+
+databases:
+  - name: pharma-erp-db
+    databaseName: pharma_erp
+    user: pharma_erp_owner
+    plan: basic-256mb
+    postgresMajorVersion: '16'
+    ipAllowList: [] # only reachable from inside Render's network
+
+services:
+  # ---------------------------------------------------------------------------
+  # API — NestJS
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: pharma-erp-api
+    runtime: node
+    plan: starter
+    region: oregon # keep the database and both services in one region
+    branch: main
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @pharma-erp/database db:generate && pnpm --filter @pharma-erp/api build
+    startCommand: node apps/api/dist/main.js
+    # Migrations run once per deploy, before the new instance takes traffic.
+    # Requires a paid instance type; on the free tier, run `pnpm db:migrate:deploy`
+    # from a shell against MIGRATION_DATABASE_URL instead.
+    preDeployCommand: pnpm --filter @pharma-erp/database db:migrate:deploy
+    healthCheckPath: /health/ready
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: '22'
+      # Enables corepack's pnpm without a global install.
+      - key: PNPM_VERSION
+        value: '9.15.4'
+
+      # The OWNER connection: DDL for migrations, and tenant provisioning (which
+      # RLS blocks for the application role by design).
+      - key: MIGRATION_DATABASE_URL
+        fromDatabase:
+          name: pharma-erp-db
+          property: connectionString
+
+      # The RUNTIME connection, as `pharma_app`. Set this by hand after running
+      # scripts/render-bootstrap.sql — take the owner URL above and swap the
+      # username and password for pharma_app's. Keep `?sslmode=require`.
+      - key: DATABASE_URL
+        sync: false
+
+      # Lets the web app's origin through CORS without hardcoding the URL.
+      - key: WEB_ORIGIN
+        fromService:
+          name: pharma-erp-web
+          type: web
+          property: host
+      # Rejects a validly-signed Clerk token minted for any other site.
+      - key: CLERK_AUTHORIZED_PARTIES
+        fromService:
+          name: pharma-erp-web
+          type: web
+          property: host
+
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+
+      - key: APP_VERSION
+        value: '0.1.0'
+
+  # ---------------------------------------------------------------------------
+  # Web — Next.js
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: pharma-erp-web
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @pharma-erp/web build
+    startCommand: pnpm --filter @pharma-erp/web start
+    healthCheckPath: /sign-in
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: '22'
+      - key: PNPM_VERSION
+        value: '9.15.4'
+
+      # NEXT_PUBLIC_* are inlined into the browser bundle at BUILD time, not read
+      # at runtime. Changing either of these requires a rebuild, not a restart —
+      # Render does rebuild on an env var change, so this is handled, but it is
+      # why a "just restart it" fix will not pick up a new value.
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          name: pharma-erp-api
+          type: web
+          property: host
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false

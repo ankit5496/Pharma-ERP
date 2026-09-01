@@ -1,0 +1,10 @@
+node_modules
+dist
+.next
+.turbo
+coverage
+pnpm-lock.yaml
+packages/database/generated
+
+# Prettier has no SQL parser; migrations and SQL scripts are hand-formatted.
+*.sql

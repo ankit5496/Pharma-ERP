@@ -1,0 +1,12 @@
+{
+  "extends": "@pharma-erp/config/tsconfig/library.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // Keep the incremental cache inside the output dir: beside tsconfig.json it
+    // survives a `rm -rf dist`, after which tsc emits nothing because it still
+    // believes the output is current.
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

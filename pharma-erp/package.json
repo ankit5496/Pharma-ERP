@@ -1,0 +1,33 @@
+{
+  "name": "pharma-erp",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}\"",
+    "db:generate": "pnpm --filter @pharma-erp/database db:generate",
+    "db:migrate": "pnpm --filter @pharma-erp/database db:migrate",
+    "db:migrate:deploy": "pnpm --filter @pharma-erp/database db:migrate:deploy",
+    "db:studio": "pnpm --filter @pharma-erp/database db:studio",
+    "db:reset": "pnpm --filter @pharma-erp/database db:reset",
+    "verify:rls": "dotenv -e .env -- node scripts/verify-rls.mjs"
+  },
+  "devDependencies": {
+    "@pharma-erp/config": "workspace:*",
+    "@pharma-erp/database": "workspace:*",
+    "dotenv-cli": "^8.0.0",
+    "prettier": "^3.4.2",
+    "prettier-plugin-tailwindcss": "^0.6.10",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.3"
+  }
+}

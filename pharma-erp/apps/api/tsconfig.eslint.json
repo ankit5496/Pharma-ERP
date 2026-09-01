@@ -1,0 +1,7 @@
+{
+  // ESLint's type-aware rules need every linted file to belong to a program,
+  // including the *.spec.ts files that tsconfig.json excludes from the build.
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*.ts", "jest.config.js"],
+  "exclude": ["node_modules", "dist"]
+}

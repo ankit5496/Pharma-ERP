@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "Pharma ERP shared library",
+  "extends": "./base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    // rootDir and outDir are deliberately NOT set here: paths in a tsconfig are
+    // resolved relative to the file that declares them, so a shared preset
+    // would point every consumer at packages/config. Each package sets its own.
+    "composite": true
+  }
+}

@@ -1,0 +1,189 @@
+// =============================================================================
+// Pharma ERP — Prisma schema
+// =============================================================================
+// Scope of this file today: Tenant, User and AuditLog only. The rest of the
+// domain (Item, Party, Bom, Batch, purchase/production/sales) lands
+// incrementally, flow by flow.
+//
+// Two rules apply to every model added from here on:
+//
+//   1. TENANT SCOPING — every tenant-scoped table carries `tenantId` (UUID) and
+//      gets a Row-Level Security policy in a raw-SQL migration. Prisma-level
+//      `where: { tenantId }` filters are a second layer, never the only one.
+//   2. NO HARD DELETES on compliance-relevant tables — carry `deletedAt` and
+//      filter it out in queries. AuditLog is stricter still: append-only,
+//      enforced by a database trigger.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  // Default output (node_modules/.prisma/client, surfaced as '@prisma/client').
+  // A custom output directory would force this package's compiled .d.ts to
+  // reference a relative path that does not exist inside dist/, so consumers
+  // would silently lose every generated type.
+}
+
+datasource db {
+  provider = "postgresql"
+  // Runtime connection: the least-privilege `pharma_app` role, so RLS applies.
+  url       = env("DATABASE_URL")
+  // Migrations / Studio: the superuser, which needs DDL rights. Prisma uses
+  // `directUrl` for migrate + introspect + studio and `url` for the client.
+  directUrl = env("MIGRATION_DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+/// Mirrors USER_ROLES in packages/types/src/roles.ts. A compile-time assertion
+/// in src/index.ts fails the build if the two lists ever diverge.
+enum UserRole {
+  ADMIN
+  PURCHASE_MANAGER
+  STORE_OFFICER
+  PRODUCTION_OFFICER
+  QUALITY_OFFICER
+  SALES_MANAGER
+  ACCOUNTANT
+  MANAGEMENT
+}
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+/// Mutations recorded in the audit trail.
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  SOFT_DELETE
+  RESTORE
+}
+
+// -----------------------------------------------------------------------------
+// Tenant — the root of the multi-tenancy tree
+// -----------------------------------------------------------------------------
+
+/// One pharma manufacturing company. This is the ONLY model without a
+/// `tenantId` column, because its own `id` IS the tenant id; its RLS policy
+/// compares `id` against the session's current tenant instead.
+model Tenant {
+  id   String @id @default(uuid()) @db.Uuid
+  /// URL-safe identifier used for tenant-specific routes and subdomains.
+  slug String @unique @db.VarChar(63)
+  name String @db.VarChar(255)
+
+  status TenantStatus @default(TRIAL)
+
+  /// Manufacturing licence number issued by the state FDA / drug controller.
+  /// Nullable during onboarding; required before a batch can be released.
+  drugLicenceNumber String? @map("drug_licence_number") @db.VarChar(64)
+  gstin             String? @db.VarChar(15)
+  /// IANA zone (e.g. "Asia/Kolkata"). Batch and expiry dates are legally
+  /// meaningful, so they are rendered in the tenant's own zone, not the server's.
+  timezone          String  @default("Asia/Kolkata") @db.VarChar(64)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// Soft delete. A tenant is never physically removed — its records are
+  /// retained for the statutory retention period.
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  users     User[]
+  auditLogs AuditLog[]
+
+  @@index([deletedAt])
+  @@map("tenants")
+}
+
+// -----------------------------------------------------------------------------
+// User
+// -----------------------------------------------------------------------------
+
+/// A person who signs in. Authentication itself is delegated to an external
+/// provider (not yet chosen/wired): `externalAuthId` is the join key to that
+/// provider's user record, and no password material is ever stored here.
+model User {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  /// Subject id from the auth provider. Null until the invited user first
+  /// completes sign-in.
+  externalAuthId String? @unique @map("external_auth_id") @db.VarChar(255)
+
+  email    String  @db.VarChar(320)
+  fullName String  @map("full_name") @db.VarChar(255)
+  phone    String? @db.VarChar(32)
+
+  role   UserRole
+  status UserStatus @default(INVITED)
+
+  lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(6)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  auditLogs AuditLog[]
+
+  /// Email is unique per tenant, not globally: the same person may legitimately
+  /// hold accounts at two companies on the platform.
+  @@unique([tenantId, email])
+  @@index([tenantId, role])
+  @@index([tenantId, deletedAt])
+  @@map("users")
+}
+
+// -----------------------------------------------------------------------------
+// AuditLog
+// -----------------------------------------------------------------------------
+
+/// Append-only trail written automatically by the API's audit interceptor.
+///
+/// Append-only is enforced in two places: the API never exposes update/delete,
+/// and a database trigger (see the RLS migration) raises an exception on any
+/// UPDATE or DELETE. There is deliberately no `deletedAt` column — a row that
+/// could be marked deleted would not be an audit trail.
+model AuditLog {
+  id       BigInt @id @default(autoincrement())
+  tenantId String @map("tenant_id") @db.Uuid
+
+  /// Prisma model name of the audited entity, e.g. "Batch".
+  entityType String      @map("entity_type") @db.VarChar(64)
+  /// Primary key of the audited row, stringified (keys are not all UUIDs).
+  entityId   String      @map("entity_id") @db.VarChar(64)
+  action     AuditAction
+
+  /// Acting user. Null for system/background writes (migrations, jobs).
+  userId String? @map("user_id") @db.Uuid
+  /// Snapshot of the row before the change; null on CREATE.
+  beforeJson Json? @map("before_json")
+  /// Snapshot of the row after the change; null on DELETE.
+  afterJson  Json? @map("after_json")
+
+  /// Request correlation id, for tying an audit entry back to API logs.
+  requestId String? @map("request_id") @db.VarChar(64)
+  ipAddress String? @map("ip_address") @db.Inet
+  userAgent String? @map("user_agent") @db.VarChar(512)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  /// The access pattern that matters: "what happened to this record".
+  @@index([tenantId, entityType, entityId, createdAt])
+  @@index([tenantId, userId, createdAt])
+  @@map("audit_logs")
+}

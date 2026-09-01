@@ -1,0 +1,39 @@
+# Local development Postgres for Pharma ERP.
+#
+# Two roles are provisioned (see docker/postgres/init/01-roles.sql):
+#   - ${POSTGRES_SUPERUSER}  → DDL / migrations only
+#   - ${POSTGRES_APP_USER}   → the API's runtime connection; NOT a superuser and
+#                              not the table owner, so Row-Level Security is
+#                              always enforced. This split is the whole reason
+#                              RLS is meaningful — a superuser bypasses it.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pharma-erp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-pharma_erp}
+      # Consumed by the init script below.
+      APP_DB_USER: ${POSTGRES_APP_USER:-pharma_app}
+      APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:-pharma_app_dev_password}
+      # Deterministic collation so index/sort behaviour matches across machines.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pharma-erp-pgdata:/var/lib/postgresql/data
+      # Runs once, on first initialisation of an empty data volume.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_SUPERUSER:-postgres} -d ${POSTGRES_DB:-pharma_erp}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pharma-erp-pgdata:
+    name: pharma-erp-pgdata
