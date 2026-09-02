@@ -76,8 +76,31 @@ describe('validateEnv', () => {
 
     it('refuses to start in production with test keys', () => {
       expect(() => validateEnv({ ...VALID, NODE_ENV: 'production' })).toThrow(
-        /production with Clerk test keys/,
+        /production with Clerk TEST keys/,
       );
+    });
+
+    it('allows test keys in production only with the explicit opt-out', () => {
+      // Staging runs NODE_ENV=production against a Clerk development instance,
+      // so the rule has to be escapable — but only deliberately.
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const result = validateEnv({
+        ...VALID,
+        NODE_ENV: 'production',
+        ALLOW_CLERK_TEST_KEYS: 'true',
+      });
+
+      expect(result.NODE_ENV).toBe(NodeEnvironment.Production);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Clerk TEST keys'));
+
+      warn.mockRestore();
+    });
+
+    it.each(['false', 'no', '0', ''])('still refuses when the opt-out is %p', (value) => {
+      expect(() =>
+        validateEnv({ ...VALID, NODE_ENV: 'production', ALLOW_CLERK_TEST_KEYS: value }),
+      ).toThrow(/production with Clerk TEST keys/);
     });
   });
 

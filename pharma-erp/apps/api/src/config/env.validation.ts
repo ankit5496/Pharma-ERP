@@ -108,6 +108,16 @@ export class EnvironmentVariables {
   @IsString()
   CLERK_AUTHORIZED_PARTIES?: string;
 
+  /**
+   * Opt out of the "no Clerk test keys in production" rule. Intended for
+   * staging and preview deployments, which run NODE_ENV=production but point at
+   * a Clerk development instance. Never set this on a deployment serving real
+   * users — see validateEnv.
+   */
+  @IsOptional()
+  @IsString()
+  ALLOW_CLERK_TEST_KEYS?: string;
+
   /** Reported by `GET /health`; injected by CI, defaulted for local runs. */
   @IsOptional()
   @IsString()
@@ -148,9 +158,16 @@ export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables 
       .map((error) => `  - ${error.property}: ${Object.values(error.constraints ?? {}).join('; ')}`)
       .join('\n');
 
+    // Two audiences read this: someone running locally who forgot to create
+    // .env, and someone staring at a deploy log wondering where to put values
+    // when there is no .env file at all. Address both, because the second case
+    // is where a "copy .env.example" hint wastes the most time.
     throw new Error(
       `Invalid environment configuration.\n${details}\n\n` +
-        `Copy .env.example to .env at the repo root and fill in the required values.`,
+        `  Local:  copy .env.example to .env at the repo root and fill these in.\n` +
+        `  Hosted: set them as environment variables on the service (Render:\n` +
+        `          Dashboard -> your service -> Environment -> Add Environment Variable).\n` +
+        `          There is no .env file in a deployed container; the platform supplies them.`,
     );
   }
 
@@ -171,10 +188,35 @@ export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables 
   }
 
   if (config.NODE_ENV === NodeEnvironment.Production && secretEnv === 'test') {
-    throw new Error('Refusing to start in production with Clerk test keys.');
+    // Test keys in production are almost always a mistake — a Clerk development
+    // instance has permissive origins and its own user pool, so real users would
+    // be authenticating against a throwaway directory. But a staging deployment
+    // legitimately runs NODE_ENV=production against test keys, so the rule is an
+    // explicit opt-out rather than an absolute.
+    if (!parseBoolean(config.ALLOW_CLERK_TEST_KEYS)) {
+      throw new Error(
+        'Refusing to start: NODE_ENV=production with Clerk TEST keys.\n' +
+          '  For a real deployment, use live keys from your Clerk production instance.\n' +
+          '  For staging/preview, set ALLOW_CLERK_TEST_KEYS=true to accept the risk.',
+      );
+    }
+
+    // eslint-disable-next-line no-console -- must be visible in deploy logs before the logger exists
+    console.warn(
+      '[env] WARNING: running in production with Clerk TEST keys because ' +
+        'ALLOW_CLERK_TEST_KEYS=true. Do not serve real users this way.',
+    );
   }
 
   return config;
+}
+
+/** Reads a boolean from the loose string forms an env var arrives in. */
+function parseBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value === undefined || value === null || value === '') return false;
+
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
 /**

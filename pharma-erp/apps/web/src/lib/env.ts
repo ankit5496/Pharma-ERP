@@ -22,20 +22,43 @@ function readApiUrl(): string {
 
   if (!raw || raw.trim() === '') {
     throw new Error(
-      'NEXT_PUBLIC_API_URL is not set. Copy .env.example to .env at the repo root ' +
-        '(see README, "Environment") and set it to the API base URL, e.g. http://localhost:4000',
+      [
+        'NEXT_PUBLIC_API_URL is not set.',
+        '  Local:  copy .env.example to .env at the repo root, set it to http://localhost:4000',
+        '  Hosted: set it as an environment variable on the WEB service, pointing at the API',
+        '          service URL. NEXT_PUBLIC_* values are inlined at BUILD time, so it must be',
+        '          present when the build runs — not only at runtime.',
+      ].join('\n'),
     );
   }
 
-  const trimmed = raw.trim().replace(/\/+$/, '');
+  let trimmed = raw.trim().replace(/\/+$/, '');
+
+  // Accept a bare hostname and assume https. Render's Blueprint `fromService`
+  // exposes a service's address as `host`, which is a hostname with no scheme
+  // ("pharma-erp-api.onrender.com") — there is no property that includes one.
+  // Rejecting that would make the auto-wiring in render.yaml unusable and force
+  // every URL to be pasted by hand.
+  //
+  // localhost is the one case that must NOT be upgraded to https: a local API
+  // serves plain http, and silently rewriting it produces a connection error
+  // that looks nothing like its cause.
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    const isLoopback = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(trimmed);
+    trimmed = `${isLoopback ? 'http' : 'https'}://${trimmed}`;
+  }
+
+  let parsed: URL;
 
   try {
-    // Throws on a value that is not an absolute URL — a common mistake is
-    // setting a bare host or a path.
-    new URL(trimmed);
+    parsed = new URL(trimmed);
   } catch {
+    throw new Error(`NEXT_PUBLIC_API_URL is not a usable URL or hostname (received: ${raw}).`);
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(
-      `NEXT_PUBLIC_API_URL must be an absolute URL including the scheme (received: ${raw}).`,
+      `NEXT_PUBLIC_API_URL must be http or https (received protocol: ${parsed.protocol}).`,
     );
   }
 
