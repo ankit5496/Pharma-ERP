@@ -1,9 +1,10 @@
 // =============================================================================
 // Pharma ERP — Prisma schema
 // =============================================================================
-// Scope of this file today: Tenant, User and AuditLog only. The rest of the
-// domain (Item, Party, Bom, Batch, purchase/production/sales) lands
+// Scope of this file today: Tenant, User, AuditLog and Item. The rest of the
+// domain (Party, Bom, Batch, purchase/production/sales) lands
 // incrementally, flow by flow.
+
 //
 // Two rules apply to every model added from here on:
 //
@@ -69,6 +70,20 @@ enum AuditAction {
   SOFT_DELETE
   RESTORE
 }
+enum ItemCategory {
+  RAW_MATERIAL
+  PACKING_MATERIAL
+  SEMI_FINISHED
+  FINISHED_GOOD
+}
+
+enum ScheduleClassification {
+  NONE
+  H
+  H1
+  X
+  G
+}
 
 // -----------------------------------------------------------------------------
 // Tenant — the root of the multi-tenancy tree
@@ -101,6 +116,7 @@ model Tenant {
 
   users     User[]
   auditLogs AuditLog[]
+  items     Item[]
 
   @@index([deletedAt])
   @@map("tenants")
@@ -187,3 +203,59 @@ model AuditLog {
   @@index([tenantId, userId, createdAt])
   @@map("audit_logs")
 }
+
+// -----------------------------------------------------------------------------
+// Item — product / material master
+// -----------------------------------------------------------------------------
+
+/// Every raw material, packing material, semi-finished and finished good used
+/// or produced by the tenant. Referenced by every downstream flow: BOM, GRN,
+/// batch, purchase invoice, sales invoice.
+model Item {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  /// Short reference code, unique within the tenant, e.g. "RM-001".
+  code        String @db.VarChar(32)
+  brandName   String @map("brand_name") @db.VarChar(255)
+  /// INN / generic name. Required by CDSCO for Schedule H / H1 / X items.
+  genericName String @map("generic_name") @db.VarChar(255)
+
+  category               ItemCategory
+  /// Defaults to NONE; drives dispensing rules and label requirements downstream.
+  scheduleClassification ScheduleClassification @default(NONE) @map("schedule_classification")
+
+  /// 6- or 8-digit HSN code for GST classification.
+  hsnCode String  @map("hsn_code") @db.VarChar(8)
+  /// GST rate as a percentage, e.g. 12.00 for 12 %. Decimal avoids
+  /// floating-point rounding on tax calculations.
+  gstRate Decimal @map("gst_rate") @db.Decimal(5, 2)
+
+  /// Maximum Retail Price in INR. Null for raw / packing materials.
+  mrp              Decimal? @db.Decimal(12, 2)
+  /// When true, a ceiling-price check is enforced before a sales invoice is confirmed.
+  isDpcoControlled Boolean  @default(false) @map("is_dpco_controlled")
+
+  /// Free-text storage conditions printed on batch records and labels,
+  /// e.g. "Store below 25 °C, protect from light".
+  storageConditions String? @map("storage_conditions") @db.VarChar(500)
+
+  /// Minimum stock quantity that triggers a purchase requisition.
+  /// Decimal with 3 dp to handle items measured in grams or ml.
+  reorderLevel  Decimal? @map("reorder_level") @db.Decimal(12, 3)
+  /// Shelf life in days. Used to compute expiry date when a batch is manufactured.
+  shelfLifeDays Int?     @map("shelf_life_days")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  /// Item code is unique within a tenant, not globally.
+  @@unique([tenantId, code])
+  @@index([tenantId, category])
+  @@index([tenantId, deletedAt])
+  @@map("items")
+}
+
