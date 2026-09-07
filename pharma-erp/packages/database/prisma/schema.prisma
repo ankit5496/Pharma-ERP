@@ -1,9 +1,10 @@
 // =============================================================================
 // Pharma ERP — Prisma schema
 // =============================================================================
-// Scope of this file today: Tenant, User, AuditLog and Item. The rest of the
-// domain (Party, Bom, Batch, purchase/production/sales) lands
-// incrementally, flow by flow.
+// Scope of this file today: Tenant, User, AuditLog, Item, Party,
+// ComplianceLicence, JobWorkAgreement, JobWorkProduct, Bom, Batch,
+// PackagingRequirement, and the full purchase / production / sales flows.
+
 
 //
 // Two rules apply to every model added from here on:
@@ -85,6 +86,96 @@ enum ScheduleClassification {
   G
 }
 
+enum PartyType {
+  SUPPLIER
+  CUSTOMER
+  BOTH
+  PRINCIPAL
+}
+
+enum PartyStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum LicenceType {
+  MANUFACTURING
+  GST
+  NARCOTICS
+  WHOLESALE_DRUG
+  IMPORT_EXPORT
+  OTHER
+}
+
+enum LicenceStatus {
+  ACTIVE
+  EXPIRED
+  SURRENDERED
+}
+
+enum JobWorkBillingModel {
+  OWN_PROCUREMENT
+  PURE_CONVERSION
+}
+
+enum BomStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum BatchType {
+  MANUFACTURED
+  PURCHASED
+}
+
+enum BatchStatus {
+  IN_PROGRESS
+  QC_PENDING
+  RELEASED
+  REJECTED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  CONFIRMED
+  CLOSED
+  CANCELLED
+}
+
+enum GrnStatus {
+  DRAFT
+  POSTED
+}
+
+enum PurchaseInvoiceStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+enum WorkOrderStatus {
+  DRAFT
+  RELEASED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum SalesOrderStatus {
+  DRAFT
+  CONFIRMED
+  DISPATCHED
+  CANCELLED
+}
+
+enum SalesInvoiceStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+
 // -----------------------------------------------------------------------------
 // Tenant — the root of the multi-tenancy tree
 // -----------------------------------------------------------------------------
@@ -114,12 +205,33 @@ model Tenant {
   /// retained for the statutory retention period.
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
 
-  users     User[]
-  auditLogs AuditLog[]
-  items     Item[]
+  users                    User[]
+  auditLogs                AuditLog[]
+  items                    Item[]
+  parties                  Party[]
+  complianceLicences       ComplianceLicence[]
+  jobWorkAgreements        JobWorkAgreement[]
+  jobWorkProducts          JobWorkProduct[]
+  packagingRequirements    PackagingRequirement[]
+  packagingRequirementLines PackagingRequirementLine[]
+  boms                     Bom[]
+  bomLines                 BomLine[]
+  purchaseOrders           PurchaseOrder[]
+  purchaseOrderLines       PurchaseOrderLine[]
+  grns                     Grn[]
+  grnLines                 GrnLine[]
+  purchaseInvoices         PurchaseInvoice[]
+  purchaseInvoiceLines     PurchaseInvoiceLine[]
+  workOrders               WorkOrder[]
+  batches                  Batch[]
+  salesOrders              SalesOrder[]
+  salesOrderLines          SalesOrderLine[]
+  salesInvoices            SalesInvoice[]
+  salesInvoiceLines        SalesInvoiceLine[]
 
   @@index([deletedAt])
   @@map("tenants")
+
 }
 
 // -----------------------------------------------------------------------------
@@ -150,8 +262,9 @@ model User {
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
 
-  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  auditLogs AuditLog[]
+    tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  auditLogs       AuditLog[]
+  releasedBatches Batch[]  @relation("BatchReleasedBy")
 
   /// Email is unique per tenant, not globally: the same person may legitimately
   /// hold accounts at two companies on the platform.
@@ -250,12 +363,677 @@ model Item {
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+    tenant                    Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  boms                      Bom[]
+  bomLines                  BomLine[]                  @relation("BomLineItem")
+  purchaseOrderLines        PurchaseOrderLine[]
+  grnLines                  GrnLine[]
+  batches                   Batch[]
+  salesOrderLines           SalesOrderLine[]
+  jobWorkProducts           JobWorkProduct[]
+  packagingRequirements     PackagingRequirement[]
+  packagingRequirementLines PackagingRequirementLine[] @relation("PackagingRequirementLineItem")
 
   /// Item code is unique within a tenant, not globally.
   @@unique([tenantId, code])
   @@index([tenantId, category])
   @@index([tenantId, deletedAt])
   @@map("items")
+}
+// -----------------------------------------------------------------------------
+// Party — supplier / customer / principal master
+// -----------------------------------------------------------------------------
+
+model Party {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  code   String      @db.VarChar(32)
+  name   String      @db.VarChar(255)
+  type   PartyType
+  status PartyStatus @default(ACTIVE)
+
+  gstin   String? @db.VarChar(15)
+  pan     String? @db.VarChar(10)
+  address String? @db.VarChar(500)
+
+  contactName  String? @map("contact_name") @db.VarChar(255)
+  contactPhone String? @map("contact_phone") @db.VarChar(32)
+  contactEmail String? @map("contact_email") @db.VarChar(320)
+
+  /// Supplier-specific: drug licence held by the supplier.
+  supplierDrugLicence String? @map("supplier_drug_licence") @db.VarChar(64)
+  /// Supplier-specific: net payment terms in days, e.g. 30 = net-30.
+  paymentTermsDays    Int?    @map("payment_terms_days")
+
+  /// Customer-specific: drug licence number.
+  customerDrugLicence       String?   @map("customer_drug_licence") @db.VarChar(64)
+  /// Customer-specific: expiry date of the customer's drug licence.
+  customerDrugLicenceExpiry DateTime? @map("customer_drug_licence_expiry") @db.Date
+  /// Customer-specific: maximum outstanding balance allowed.
+  creditLimitAmount         Decimal?  @map("credit_limit_amount") @db.Decimal(12, 2)
+  /// Customer-specific: credit period in days before payment is due.
+  creditPeriodDays          Int?      @map("credit_period_days")
+
+  /// True when this party is a brand owner for job-work agreements.
+  isPrincipal Boolean @default(false) @map("is_principal")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  purchaseOrders    PurchaseOrder[]
+  salesOrders       SalesOrder[]
+  jobWorkAgreements JobWorkAgreement[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, type])
+  @@index([tenantId, status])
+  @@index([tenantId, deletedAt])
+  @@map("parties")
+}
+
+// -----------------------------------------------------------------------------
+// ComplianceLicence — manufacturing, GST, narcotics and other licences
+// -----------------------------------------------------------------------------
+
+/// A regulatory licence held by the tenant. Separate from Tenant.drugLicenceNumber
+/// (a quick-access field); this table is the authoritative record with full
+/// expiry tracking and renewal alerts.
+model ComplianceLicence {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  licenceType      LicenceType   @map("licence_type")
+  licenceNumber    String        @map("licence_number") @db.VarChar(64)
+  issuingAuthority String        @map("issuing_authority") @db.VarChar(255)
+  issueDate        DateTime      @map("issue_date") @db.Date
+  expiryDate       DateTime      @map("expiry_date") @db.Date
+  status           LicenceStatus @default(ACTIVE)
+
+  /// Days before expiry to trigger a renewal alert. Defaults to 90.
+  alertThresholdDays Int @default(90) @map("alert_threshold_days")
+
+  /// Reference to a scanned copy stored outside the DB.
+  documentUrl String? @map("document_url") @db.VarChar(500)
+  remarks     String? @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, licenceType, licenceNumber])
+  @@index([tenantId, licenceType])
+  @@index([tenantId, status])
+  @@index([tenantId, expiryDate])
+  @@index([tenantId, deletedAt])
+  @@map("compliance_licences")
+}
+
+// -----------------------------------------------------------------------------
+// JobWorkAgreement + JobWorkProduct — principal & job-work agreement master
+// -----------------------------------------------------------------------------
+
+/// A job-work agreement between the tenant (manufacturer) and a Principal
+/// (brand owner). billingModel drives whether the principal supplies raw
+/// materials or the tenant procures everything and bills a conversion charge.
+model JobWorkAgreement {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  /// The principal party. Must have isPrincipal = true.
+  principalId     String              @map("principal_id") @db.Uuid
+  agreementNumber String              @map("agreement_number") @db.VarChar(64)
+  billingModel    JobWorkBillingModel @map("billing_model")
+
+  /// Agreement-level conversion charge rate per unit (PURE_CONVERSION).
+  conversionChargeRate Decimal? @map("conversion_charge_rate") @db.Decimal(12, 2)
+  currency             String   @default("INR") @db.VarChar(8)
+
+  effectiveDate DateTime  @map("effective_date") @db.Date
+  expiryDate    DateTime? @map("expiry_date") @db.Date
+  remarks       String?   @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  principal Party            @relation(fields: [principalId], references: [id], onDelete: Restrict)
+  products  JobWorkProduct[]
+
+  @@unique([tenantId, agreementNumber])
+  @@index([tenantId, principalId])
+  @@index([tenantId, deletedAt])
+  @@map("job_work_agreements")
+}
+
+/// Maps a finished-good Item to a JobWorkAgreement — the product-to-brand
+/// mapping. One item can appear under multiple agreements over time.
+model JobWorkProduct {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  jobWorkAgreementId String @map("job_work_agreement_id") @db.Uuid
+  itemId             String @map("item_id") @db.Uuid
+  brandName          String @map("brand_name") @db.VarChar(255)
+  /// Product-level override of the agreement conversion charge rate.
+  conversionChargeRate Decimal? @map("conversion_charge_rate") @db.Decimal(12, 2)
+  remarks              String?  @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  jobWorkAgreement JobWorkAgreement @relation(fields: [jobWorkAgreementId], references: [id], onDelete: Restrict)
+  item             Item             @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, jobWorkAgreementId, itemId])
+  @@index([tenantId, jobWorkAgreementId])
+  @@index([tenantId, itemId])
+  @@index([tenantId, deletedAt])
+  @@map("job_work_products")
+}
+
+// -----------------------------------------------------------------------------
+// Bom + BomLine — Bill of Materials / formulation master
+// -----------------------------------------------------------------------------
+
+/// BOM header. Belongs to one FINISHED_GOOD Item. Multiple versions allowed;
+/// only one may be ACTIVE at a time — enforced by a partial unique index
+/// hand-written in the RLS migration (Prisma cannot express partial indexes).
+model Bom {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  itemId  String    @map("item_id") @db.Uuid
+  version String    @db.VarChar(32)
+  status  BomStatus @default(DRAFT)
+
+  /// Standard batch size this BOM is written for. Work Orders scale quantities
+  /// proportionally to their own planned quantity.
+  batchSize    Decimal @map("batch_size") @db.Decimal(12, 3)
+  batchSizeUom String  @map("batch_size_uom") @db.VarChar(16)
+  remarks      String? @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  item       Item        @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  lines      BomLine[]
+  workOrders WorkOrder[]
+
+  @@unique([tenantId, itemId, version])
+  @@index([tenantId, itemId, status])
+  @@index([tenantId, deletedAt])
+  @@map("boms")
+}
+
+model BomLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  bomId  String @map("bom_id") @db.Uuid
+  itemId String @map("item_id") @db.Uuid
+
+  quantity       Decimal  @db.Decimal(12, 3)
+  uom            String   @db.VarChar(16)
+  /// Optional overage/loss allowance as a percentage.
+  overagePercent Decimal? @map("overage_percent") @db.Decimal(5, 2)
+  remarks        String?  @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  bom    Bom    @relation(fields: [bomId], references: [id], onDelete: Restrict)
+  item   Item   @relation("BomLineItem", fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, bomId, itemId])
+  @@index([tenantId, bomId])
+  @@index([tenantId, deletedAt])
+  @@map("bom_lines")
+}
+
+// -----------------------------------------------------------------------------
+// PackagingRequirement + PackagingRequirementLine — packaging master
+// -----------------------------------------------------------------------------
+
+/// Packaging requirement header — one per finished-good Item per pack-size
+/// variant (e.g. "10x10 Blister", "30ml Bottle").
+model PackagingRequirement {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  itemId          String  @map("item_id") @db.Uuid
+  packSizeVariant String  @map("pack_size_variant") @db.VarChar(64)
+  unitsPerPack    Int     @map("units_per_pack")
+  packsPerBatch   Int     @map("packs_per_batch")
+  remarks         String? @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  item   Item                       @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  lines  PackagingRequirementLine[]
+
+  @@unique([tenantId, itemId, packSizeVariant])
+  @@index([tenantId, itemId])
+  @@index([tenantId, deletedAt])
+  @@map("packaging_requirements")
+}
+
+/// One packaging component line. isMandatory = true causes a hard block on
+/// Work Order / Dispatch when stock is short; false causes a warning only.
+model PackagingRequirementLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  packagingRequirementId String @map("packaging_requirement_id") @db.Uuid
+  /// Must be a PACKING_MATERIAL Item.
+  itemId                 String @map("item_id") @db.Uuid
+  /// Display label, e.g. "Bottle", "Cap", "Label", "Carton", "Insert".
+  componentType          String @map("component_type") @db.VarChar(64)
+
+  qtyPerPack  Decimal @map("qty_per_pack") @db.Decimal(12, 3)
+  uom         String  @db.VarChar(16)
+  isMandatory Boolean @default(true) @map("is_mandatory")
+  remarks     String? @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant               Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  packagingRequirement PackagingRequirement @relation(fields: [packagingRequirementId], references: [id], onDelete: Restrict)
+  item                 Item                 @relation("PackagingRequirementLineItem", fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, packagingRequirementId, itemId])
+  @@index([tenantId, packagingRequirementId])
+  @@index([tenantId, deletedAt])
+  @@map("packaging_requirement_lines")
+}
+
+// -----------------------------------------------------------------------------
+// Purchase flow: PurchaseOrder → Grn → PurchaseInvoice
+// -----------------------------------------------------------------------------
+
+model PurchaseOrder {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  poNumber  String              @map("po_number") @db.VarChar(32)
+  partyId   String              @map("party_id") @db.Uuid
+  status    PurchaseOrderStatus @default(DRAFT)
+  orderDate DateTime            @map("order_date") @db.Date
+  dueDate   DateTime?           @map("due_date") @db.Date
+  remarks   String?             @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  party  Party               @relation(fields: [partyId], references: [id], onDelete: Restrict)
+  lines  PurchaseOrderLine[]
+  grns   Grn[]
+
+  @@unique([tenantId, poNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, partyId])
+  @@index([tenantId, deletedAt])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  purchaseOrderId String @map("purchase_order_id") @db.Uuid
+  itemId          String @map("item_id") @db.Uuid
+  lineNumber      Int    @map("line_number")
+
+  orderedQty Decimal @map("ordered_qty") @db.Decimal(12, 3)
+  uom        String  @db.VarChar(16)
+  unitPrice  Decimal @map("unit_price") @db.Decimal(12, 2)
+  remarks    String? @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  item          Item          @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  grnLines      GrnLine[]
+
+  @@unique([tenantId, purchaseOrderId, lineNumber])
+  @@index([tenantId, purchaseOrderId])
+  @@index([tenantId, deletedAt])
+  @@map("purchase_order_lines")
+}
+
+model Grn {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  grnNumber       String    @map("grn_number") @db.VarChar(32)
+  purchaseOrderId String    @map("purchase_order_id") @db.Uuid
+  status          GrnStatus @default(DRAFT)
+  receivedDate    DateTime  @map("received_date") @db.Date
+  remarks         String?   @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  purchaseOrder    PurchaseOrder    @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  lines            GrnLine[]
+  purchaseInvoices PurchaseInvoice[]
+
+  @@unique([tenantId, grnNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, purchaseOrderId])
+  @@index([tenantId, deletedAt])
+  @@map("grns")
+}
+
+model GrnLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  grnId               String @map("grn_id") @db.Uuid
+  purchaseOrderLineId String @map("purchase_order_line_id") @db.Uuid
+  itemId              String @map("item_id") @db.Uuid
+  lineNumber          Int    @map("line_number")
+
+  receivedQty         Decimal   @map("received_qty") @db.Decimal(12, 3)
+  acceptedQty         Decimal   @map("accepted_qty") @db.Decimal(12, 3)
+  rejectedQty         Decimal   @map("rejected_qty") @db.Decimal(12, 3)
+  uom                 String    @db.VarChar(16)
+  supplierBatchNumber String?   @map("supplier_batch_number") @db.VarChar(64)
+  manufacturingDate   DateTime? @map("manufacturing_date") @db.Date
+  expiryDate          DateTime? @map("expiry_date") @db.Date
+  remarks             String?   @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant               Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  grn                  Grn                 @relation(fields: [grnId], references: [id], onDelete: Restrict)
+  purchaseOrderLine    PurchaseOrderLine   @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict)
+  item                 Item                @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  batch                Batch?
+  purchaseInvoiceLines PurchaseInvoiceLine[]
+
+  @@unique([tenantId, grnId, lineNumber])
+  @@index([tenantId, grnId])
+  @@index([tenantId, deletedAt])
+  @@map("grn_lines")
+}
+
+model PurchaseInvoice {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  invoiceNumber String                @map("invoice_number") @db.VarChar(64)
+  grnId         String                @map("grn_id") @db.Uuid
+  status        PurchaseInvoiceStatus @default(DRAFT)
+  invoiceDate   DateTime              @map("invoice_date") @db.Date
+  dueDate       DateTime?             @map("due_date") @db.Date
+
+  subtotal    Decimal @db.Decimal(12, 2)
+  taxAmount   Decimal @map("tax_amount") @db.Decimal(12, 2)
+  totalAmount Decimal @map("total_amount") @db.Decimal(12, 2)
+  remarks     String? @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant Tenant                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  grn    Grn                   @relation(fields: [grnId], references: [id], onDelete: Restrict)
+  lines  PurchaseInvoiceLine[]
+
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, grnId])
+  @@index([tenantId, deletedAt])
+  @@map("purchase_invoices")
+}
+
+model PurchaseInvoiceLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  purchaseInvoiceId String @map("purchase_invoice_id") @db.Uuid
+  grnLineId         String @map("grn_line_id") @db.Uuid
+  lineNumber        Int    @map("line_number")
+
+  quantity  Decimal @db.Decimal(12, 3)
+  uom       String  @db.VarChar(16)
+  unitPrice Decimal @map("unit_price") @db.Decimal(12, 2)
+  taxRate   Decimal @map("tax_rate") @db.Decimal(5, 2)
+  taxAmount Decimal @map("tax_amount") @db.Decimal(12, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(12, 2)
+  remarks   String? @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  purchaseInvoice PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Restrict)
+  grnLine         GrnLine         @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, purchaseInvoiceId, lineNumber])
+  @@index([tenantId, purchaseInvoiceId])
+  @@index([tenantId, deletedAt])
+  @@map("purchase_invoice_lines")
+}
+// -----------------------------------------------------------------------------
+// Production flow: WorkOrder → Batch → QC release
+// -----------------------------------------------------------------------------
+
+model WorkOrder {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  woNumber      String          @map("wo_number") @db.VarChar(32)
+  bomId         String          @map("bom_id") @db.Uuid
+  status        WorkOrderStatus @default(DRAFT)
+  plannedDate   DateTime        @map("planned_date") @db.Date
+  completedDate DateTime?       @map("completed_date") @db.Date
+
+  plannedQty Decimal @map("planned_qty") @db.Decimal(12, 3)
+  uom        String  @db.VarChar(16)
+  remarks    String? @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  bom     Bom     @relation(fields: [bomId], references: [id], onDelete: Restrict)
+  batches Batch[]
+
+  @@unique([tenantId, woNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, bomId])
+  @@index([tenantId, deletedAt])
+  @@map("work_orders")
+}
+
+/// MANUFACTURED: workOrderId set, grnLineId null.
+/// PURCHASED: grnLineId set, workOrderId null.
+model Batch {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  batchNumber String      @map("batch_number") @db.VarChar(64)
+  itemId      String      @map("item_id") @db.Uuid
+  type        BatchType
+  status      BatchStatus @default(IN_PROGRESS)
+
+  quantity          Decimal  @db.Decimal(12, 3)
+  uom               String   @db.VarChar(16)
+  manufacturingDate DateTime @map("manufacturing_date") @db.Date
+  expiryDate        DateTime @map("expiry_date") @db.Date
+
+  workOrderId String? @map("work_order_id") @db.Uuid
+  grnLineId   String? @unique @map("grn_line_id") @db.Uuid
+
+  releasedAt      DateTime? @map("released_at") @db.Timestamptz(6)
+  releasedById    String?   @map("released_by_id") @db.Uuid
+  rejectedAt      DateTime? @map("rejected_at") @db.Timestamptz(6)
+  rejectionReason String?   @map("rejection_reason") @db.VarChar(500)
+  remarks         String?   @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  item       Item       @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  workOrder  WorkOrder? @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+  grnLine    GrnLine?   @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
+  releasedBy User?      @relation("BatchReleasedBy", fields: [releasedById], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, batchNumber])
+  @@index([tenantId, itemId, status])
+  @@index([tenantId, type])
+  @@index([tenantId, deletedAt])
+  @@map("batches")
+}
+
+// -----------------------------------------------------------------------------
+// Sales flow: SalesOrder → SalesInvoice
+// -----------------------------------------------------------------------------
+
+model SalesOrder {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  soNumber  String           @map("so_number") @db.VarChar(32)
+  partyId   String           @map("party_id") @db.Uuid
+  status    SalesOrderStatus @default(DRAFT)
+  orderDate DateTime         @map("order_date") @db.Date
+  dueDate   DateTime?        @map("due_date") @db.Date
+  remarks   String?          @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  party         Party            @relation(fields: [partyId], references: [id], onDelete: Restrict)
+  lines         SalesOrderLine[]
+  salesInvoices SalesInvoice[]
+
+  @@unique([tenantId, soNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, partyId])
+  @@index([tenantId, deletedAt])
+  @@map("sales_orders")
+}
+
+model SalesOrderLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  salesOrderId String @map("sales_order_id") @db.Uuid
+  itemId       String @map("item_id") @db.Uuid
+  lineNumber   Int    @map("line_number")
+
+  orderedQty   Decimal  @map("ordered_qty") @db.Decimal(12, 3)
+  uom          String   @db.VarChar(16)
+  unitPrice    Decimal  @map("unit_price") @db.Decimal(12, 2)
+  ceilingPrice Decimal? @map("ceiling_price") @db.Decimal(12, 2)
+  remarks      String?  @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  salesOrder        SalesOrder         @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  item              Item               @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  salesInvoiceLines SalesInvoiceLine[]
+
+  @@unique([tenantId, salesOrderId, lineNumber])
+  @@index([tenantId, salesOrderId])
+  @@index([tenantId, deletedAt])
+  @@map("sales_order_lines")
+}
+
+model SalesInvoice {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  invoiceNumber String             @map("invoice_number") @db.VarChar(64)
+  salesOrderId  String             @map("sales_order_id") @db.Uuid
+  status        SalesInvoiceStatus @default(DRAFT)
+  invoiceDate   DateTime           @map("invoice_date") @db.Date
+  dueDate       DateTime?          @map("due_date") @db.Date
+
+  subtotal    Decimal @db.Decimal(12, 2)
+  taxAmount   Decimal @map("tax_amount") @db.Decimal(12, 2)
+  totalAmount Decimal @map("total_amount") @db.Decimal(12, 2)
+  remarks     String? @db.VarChar(500)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  salesOrder SalesOrder         @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  lines      SalesInvoiceLine[]
+
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, salesOrderId])
+  @@index([tenantId, deletedAt])
+  @@map("sales_invoices")
+}
+
+model SalesInvoiceLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  salesInvoiceId   String @map("sales_invoice_id") @db.Uuid
+  salesOrderLineId String @map("sales_order_line_id") @db.Uuid
+  lineNumber       Int    @map("line_number")
+
+  quantity  Decimal @db.Decimal(12, 3)
+  uom       String  @db.VarChar(16)
+  unitPrice Decimal @map("unit_price") @db.Decimal(12, 2)
+  taxRate   Decimal @map("tax_rate") @db.Decimal(5, 2)
+  taxAmount Decimal @map("tax_amount") @db.Decimal(12, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(12, 2)
+  remarks   String? @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  salesInvoice   SalesInvoice   @relation(fields: [salesInvoiceId], references: [id], onDelete: Restrict)
+  salesOrderLine SalesOrderLine @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, salesInvoiceId, lineNumber])
+  @@index([tenantId, salesInvoiceId])
+  @@index([tenantId, deletedAt])
+  @@map("sales_invoice_lines")
 }
 
