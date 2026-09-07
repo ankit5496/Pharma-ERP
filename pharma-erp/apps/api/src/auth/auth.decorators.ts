@@ -3,11 +3,11 @@ import { SetMetadata } from '@nestjs/common';
 import type { UserRole } from '@pharma-erp/types';
 
 export const AUTH_PUBLIC_KEY = 'auth:public';
-export const AUTH_ALLOW_NO_TENANT_KEY = 'auth:allowNoTenant';
+export const AUTH_ALLOW_PASSWORD_CHANGE_KEY = 'auth:allowPasswordChange';
 export const AUTH_ROLES_KEY = 'auth:roles';
 
 /**
- * Marks a route as reachable without a Clerk session.
+ * Marks a route as reachable without a session.
  *
  * The auth guard is global, so authentication is the default and this is the
  * only way out — the same inversion the audit interceptor uses. Anything marked
@@ -20,16 +20,16 @@ export const Public = (reason: string): MethodDecorator & ClassDecorator =>
   SetMetadata(AUTH_PUBLIC_KEY, reason);
 
 /**
- * Requires a valid Clerk session but NOT a tenant.
+ * Permits a route while the user still has to replace an administrator-set
+ * password.
  *
- * Exactly one situation needs this: the window between "registered with Clerk"
- * and "created a company". `GET /me` has to be able to answer "you have no
- * tenant yet", and `POST /onboarding/company` has to be callable in order to
- * create one. Everything else must have a tenant, or the request has no
- * business touching tenant-scoped data.
+ * Everything else is refused in that state. An admin-chosen temporary password
+ * is a shared secret — the admin knows it, it may have been sent over chat —
+ * so the account is not fully the user's until they replace it. Only
+ * change-password and reading one's own session need this.
  */
-export const AllowNoTenant = (): MethodDecorator & ClassDecorator =>
-  SetMetadata(AUTH_ALLOW_NO_TENANT_KEY, true);
+export const AllowPasswordChange = (): MethodDecorator & ClassDecorator =>
+  SetMetadata(AUTH_ALLOW_PASSWORD_CHANGE_KEY, true);
 
 /**
  * Restricts a route to the listed roles.

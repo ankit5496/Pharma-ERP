@@ -1,6 +1,7 @@
-import { UserButton } from '@clerk/nextjs';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+
+import { logoutAction } from '@/app/(auth)/login/actions';
 import {
   READ_ONLY_ROLES,
   ROLE_MODULES,
@@ -26,7 +27,7 @@ const NAV: readonly { module: AppModule; label: string; href: string | null }[] 
   { module: 'quality', label: 'Quality & release', href: null },
   { module: 'sales', label: 'Sales', href: null },
   { module: 'accounts', label: 'Accounts', href: null },
-  { module: 'admin', label: 'Users & settings', href: null },
+  { module: 'admin', label: 'Users & settings', href: '/admin/users' },
 ];
 
 /**
@@ -60,7 +61,14 @@ export function AppShell({ user, children }: { user: SessionUser; children: Reac
               <p className="text-sm font-medium text-slate-900">{user.fullName}</p>
               <p className="text-xs text-slate-500">{USER_ROLE_LABELS[user.role]}</p>
             </div>
-            <UserButton />
+            <form action={logoutAction}>
+              <button
+                type="submit"
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+              >
+                Sign out
+              </button>
+            </form>
           </div>
         </div>
 

@@ -1,46 +1,56 @@
 import type { PrismaClient } from '@prisma/client';
 
-import { PG_EXTERNAL_AUTH_SETTING } from '@pharma-erp/types';
+import { PG_LOGIN_EMAIL_SETTING, PG_TENANT_SETTING } from '@pharma-erp/types';
 
-/** Row shape the API needs to build a RequestContext and a SessionUser. */
-export interface ResolvedIdentity {
+/**
+ * An account as the sign-in path needs it — including the password hash, which
+ * is why this type is never returned from a controller.
+ */
+export interface LoginCandidate {
   userId: string;
   tenantId: string;
   email: string;
   fullName: string;
   role: string;
   status: string;
+  passwordHash: string | null;
+  mustChangePassword: boolean;
+  failedLoginAttempts: number;
+  lockedUntil: Date | null;
   tenantName: string;
   tenantSlug: string;
   tenantStatus: string;
 }
 
 /**
- * Resolves a verified Clerk subject to our own user + tenant.
+ * Finds the single account for an email, before any tenant is known.
  *
- * Runs in a transaction that sets `app.current_external_auth_id` but NOT
- * `app.current_tenant_id` — the tenant is what we are trying to discover. The
- * `users_auth_bootstrap` / `tenants_auth_bootstrap` policies (see
- * migrations/20260901000200_auth_bootstrap) exist precisely for this query and
- * expose at most the caller's own row.
+ * Runs in a transaction that sets `app.current_login_email` but NOT
+ * `app.current_tenant_id` — the tenant is what this is trying to discover. The
+ * `users_login_lookup` / `tenants_login_lookup` policies (see migration
+ * 20260902000000_local_authentication) exist for exactly this query and expose
+ * at most the one row for the address supplied.
  *
- * Returns null when the subject has no user row yet, which is the normal state
- * between "signed up with Clerk" and "created their company".
+ * Returns null when no such account exists. The caller must NOT distinguish
+ * that from a wrong password in what it returns to the client: doing so turns
+ * the login form into an account-enumeration oracle.
  */
-export async function resolveIdentityByExternalAuthId(
+export async function findLoginCandidateByEmail(
   prisma: PrismaClient,
-  externalAuthId: string,
-): Promise<ResolvedIdentity | null> {
-  if (!externalAuthId) return null;
+  email: string,
+): Promise<LoginCandidate | null> {
+  const normalised = email.trim().toLowerCase();
+
+  if (!normalised) return null;
 
   return prisma.$transaction(async (tx) => {
-    // set_config with `true` = SET LOCAL: scoped to this transaction, and
-    // therefore to this connection checkout. Parameterised via the tagged
-    // template, so the subject is never interpolated into SQL text.
-    await tx.$executeRaw`SELECT set_config(${PG_EXTERNAL_AUTH_SETTING}, ${externalAuthId}, true)`;
+    // `true` = SET LOCAL: scoped to this transaction, and therefore to this
+    // connection checkout. Parameterised via the tagged template, so the
+    // address — which is untrusted input — is never interpolated into SQL.
+    await tx.$executeRaw`SELECT set_config(${PG_LOGIN_EMAIL_SETTING}, ${normalised}, true)`;
 
     const user = await tx.user.findFirst({
-      where: { externalAuthId, deletedAt: null },
+      where: { email: normalised, deletedAt: null },
       select: {
         id: true,
         tenantId: true,
@@ -48,11 +58,15 @@ export async function resolveIdentityByExternalAuthId(
         fullName: true,
         role: true,
         status: true,
+        passwordHash: true,
+        mustChangePassword: true,
+        failedLoginAttempts: true,
+        lockedUntil: true,
         tenant: { select: { name: true, slug: true, status: true, deletedAt: true } },
       },
     });
 
-    // A user whose tenant has been soft-deleted has no working session.
+    // An account whose company has been soft-deleted has no working session.
     if (!user || user.tenant.deletedAt !== null) return null;
 
     return {
@@ -62,6 +76,76 @@ export async function resolveIdentityByExternalAuthId(
       fullName: user.fullName,
       role: user.role,
       status: user.status,
+      passwordHash: user.passwordHash,
+      mustChangePassword: user.mustChangePassword,
+      failedLoginAttempts: user.failedLoginAttempts,
+      lockedUntil: user.lockedUntil,
+      tenantName: user.tenant.name,
+      tenantSlug: user.tenant.slug,
+      tenantStatus: user.tenant.status,
+    };
+  });
+}
+
+/** The subset of an account needed to authorise a request, minus credentials. */
+export interface ResolvedIdentity {
+  userId: string;
+  tenantId: string;
+  email: string;
+  fullName: string;
+  role: string;
+  status: string;
+  mustChangePassword: boolean;
+  tenantName: string;
+  tenantSlug: string;
+  tenantStatus: string;
+}
+
+/**
+ * Re-reads the account named by a verified token, on every request.
+ *
+ * This is what makes revocation immediate: disabling a user or changing their
+ * role takes effect on their next request, rather than whenever their token
+ * happens to expire. The cost is one indexed primary-key lookup.
+ *
+ * Unlike the login lookup, the tenant is already known — it comes from the
+ * token — so this runs fully tenant-scoped and needs no policy exception.
+ */
+export async function resolveIdentityByUserId(
+  prisma: PrismaClient,
+  tenantId: string,
+  userId: string,
+): Promise<ResolvedIdentity | null> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config(${PG_TENANT_SETTING}, ${tenantId}, true)`;
+
+    const user = await tx.user.findFirst({
+      // tenantId is redundant given the primary key, but stating it means a
+      // token naming another tenant's user id cannot resolve even if the RLS
+      // policy were ever loosened.
+      where: { id: userId, tenantId, deletedAt: null },
+      select: {
+        id: true,
+        tenantId: true,
+        email: true,
+        fullName: true,
+        role: true,
+        status: true,
+        mustChangePassword: true,
+        tenant: { select: { name: true, slug: true, status: true, deletedAt: true } },
+      },
+    });
+
+    if (!user || user.tenant.deletedAt !== null) return null;
+
+    return {
+      userId: user.id,
+      tenantId: user.tenantId,
+      email: user.email,
+      fullName: user.fullName,
+      role: user.role,
+      status: user.status,
+      mustChangePassword: user.mustChangePassword,
       tenantName: user.tenant.name,
       tenantSlug: user.tenant.slug,
       tenantStatus: user.tenant.status,

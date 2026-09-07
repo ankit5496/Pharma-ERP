@@ -11,7 +11,6 @@
     "clean": "rimraf .next .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@clerk/nextjs": "^7.8.3",
     "@pharma-erp/types": "workspace:*",
     "next": "^15.5.9",
     "react": "^19.0.0",

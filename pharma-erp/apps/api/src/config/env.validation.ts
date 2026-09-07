@@ -6,9 +6,9 @@ import {
   IsOptional,
   IsString,
   IsUrl,
-  Matches,
   Max,
   Min,
+  MinLength,
   validateSync,
 } from 'class-validator';
 
@@ -76,47 +76,32 @@ export class EnvironmentVariables {
   LOG_LEVEL: LogLevel = LogLevel.Log;
 
   /**
-   * Clerk secret key. The API uses it to verify session tokens against Clerk's
-   * JWKS and to write our role/tenant back to the Clerk user's metadata.
+   * HMAC key for signing access tokens.
+   *
+   * 32 characters minimum, because a short key is brute-forceable offline from
+   * a single captured token — and forging a token means impersonating any user
+   * in any tenant. Generate one with:
+   *   node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+   *
+   * Changing it invalidates every session immediately, which is the intended
+   * lever if you ever need to sign everyone out at once.
    */
   @IsString()
-  @IsNotEmpty({ message: 'CLERK_SECRET_KEY is required (see .env.example)' })
-  @Matches(/^sk_(test|live)_/, {
-    message: 'CLERK_SECRET_KEY must start with sk_test_ or sk_live_',
-  })
-  CLERK_SECRET_KEY!: string;
+  @IsNotEmpty({ message: 'JWT_SECRET is required (see .env.example)' })
+  @MinLength(32, { message: 'JWT_SECRET must be at least 32 characters' })
+  JWT_SECRET!: string;
 
   /**
-   * Clerk publishable key. The API never authenticates with it, but validating
-   * it here catches a mismatched pair (test key in the browser, live key on the
-   * API) at boot instead of as puzzling 401s later.
+   * Session lifetime in seconds. Default 8 hours — one working shift, so an
+   * operator is not signed out mid-batch, and a stolen token expires the same
+   * day. There are no refresh tokens: with the per-request account re-read,
+   * disabling a user already takes effect immediately, and a refresh flow would
+   * add a second credential to protect for no gain here.
    */
-  @IsString()
-  @IsNotEmpty({ message: 'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is required (see .env.example)' })
-  @Matches(/^pk_(test|live)_/, {
-    message: 'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY must start with pk_test_ or pk_live_',
-  })
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY!: string;
-
-  /**
-   * Comma-separated origins allowed to be the token's authorised party. When
-   * set, a token minted for some other site is rejected even if its signature
-   * is valid, which is what stops it being replayed against this API.
-   * Recommended in production; defaults to WEB_ORIGIN when omitted.
-   */
-  @IsOptional()
-  @IsString()
-  CLERK_AUTHORIZED_PARTIES?: string;
-
-  /**
-   * Opt out of the "no Clerk test keys in production" rule. Intended for
-   * staging and preview deployments, which run NODE_ENV=production but point at
-   * a Clerk development instance. Never set this on a deployment serving real
-   * users — see validateEnv.
-   */
-  @IsOptional()
-  @IsString()
-  ALLOW_CLERK_TEST_KEYS?: string;
+  @IsInt()
+  @Min(300)
+  @Max(86_400)
+  SESSION_TTL_SECONDS: number = 28_800;
 
   /** Reported by `GET /health`; injected by CI, defaulted for local runs. */
   @IsOptional()
@@ -143,6 +128,10 @@ export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables 
       // PORT first: a platform that injects it has already bound that port and
       // will health-check it, so ignoring it means the deploy never goes live.
       API_PORT: resolvePort(raw.PORT, raw.API_PORT),
+      SESSION_TTL_SECONDS:
+        raw.SESSION_TTL_SECONDS === undefined || raw.SESSION_TTL_SECONDS === ''
+          ? undefined
+          : Number(raw.SESSION_TTL_SECONDS),
     },
     { exposeDefaultValues: true, enableImplicitConversion: false },
   );
@@ -171,52 +160,7 @@ export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables 
     );
   }
 
-  // A live Clerk instance behind a test key pair (or the reverse) means the web
-  // app and the API are talking to two different Clerk environments, and every
-  // token the browser sends will fail verification. Catch it at boot.
-  const secretEnv = config.CLERK_SECRET_KEY.startsWith('sk_live_') ? 'live' : 'test';
-  const publishableEnv = config.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.startsWith('pk_live_')
-    ? 'live'
-    : 'test';
-
-  if (secretEnv !== publishableEnv) {
-    throw new Error(
-      `Clerk key mismatch: CLERK_SECRET_KEY is a ${secretEnv} key but ` +
-        `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is a ${publishableEnv} key. ` +
-        'Both must come from the same Clerk instance.',
-    );
-  }
-
-  if (config.NODE_ENV === NodeEnvironment.Production && secretEnv === 'test') {
-    // Test keys in production are almost always a mistake — a Clerk development
-    // instance has permissive origins and its own user pool, so real users would
-    // be authenticating against a throwaway directory. But a staging deployment
-    // legitimately runs NODE_ENV=production against test keys, so the rule is an
-    // explicit opt-out rather than an absolute.
-    if (!parseBoolean(config.ALLOW_CLERK_TEST_KEYS)) {
-      throw new Error(
-        'Refusing to start: NODE_ENV=production with Clerk TEST keys.\n' +
-          '  For a real deployment, use live keys from your Clerk production instance.\n' +
-          '  For staging/preview, set ALLOW_CLERK_TEST_KEYS=true to accept the risk.',
-      );
-    }
-
-    // eslint-disable-next-line no-console -- must be visible in deploy logs before the logger exists
-    console.warn(
-      '[env] WARNING: running in production with Clerk TEST keys because ' +
-        'ALLOW_CLERK_TEST_KEYS=true. Do not serve real users this way.',
-    );
-  }
-
   return config;
-}
-
-/** Reads a boolean from the loose string forms an env var arrives in. */
-function parseBoolean(value: unknown): boolean {
-  if (typeof value === 'boolean') return value;
-  if (value === undefined || value === null || value === '') return false;
-
-  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
 /**

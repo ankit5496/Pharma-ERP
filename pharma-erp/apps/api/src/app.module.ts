@@ -3,15 +3,18 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 
 import { AuthModule } from './auth/auth.module';
-import { ClerkAuthGuard } from './auth/clerk-auth.guard';
+import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { AuditInterceptor } from './common/audit/audit.interceptor';
 import { AuditModule } from './common/audit/audit.module';
 import { validateEnv } from './config/env.validation';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { HealthModule } from './health/health.module';
+import { PlatformModule } from './platform/platform.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RequestContextMiddleware } from './tenant/request-context.middleware';
 import { TenantModule } from './tenant/tenant.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -29,16 +32,19 @@ import { TenantModule } from './tenant/tenant.module';
     AuditModule,
     AuthModule,
     HealthModule,
+    UsersModule,
+    DashboardModule,
+    PlatformModule,
   ],
   providers: [
     {
       // Authentication is the default. A new controller is protected the moment
       // it is written; exposing one requires an explicit @Public('reason').
       provide: APP_GUARD,
-      useClass: ClerkAuthGuard,
+      useClass: JwtAuthGuard,
     },
     {
-      // Registered after ClerkAuthGuard so the request context already carries a
+      // Registered after JwtAuthGuard so the request context already carries a
       // resolved role by the time this runs — Nest executes global guards in
       // registration order.
       provide: APP_GUARD,

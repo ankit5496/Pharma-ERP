@@ -1,5 +1,6 @@
-import { auth } from '@clerk/nextjs/server';
-import type { HealthCheckResponse } from '@pharma-erp/types';
+import { cookies } from 'next/headers';
+
+import { SESSION_COOKIE_NAME, type HealthCheckResponse } from '@pharma-erp/types';
 
 import { env } from './env';
 
@@ -14,8 +15,10 @@ interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   /** Serialised as JSON with the appropriate content type. */
   json?: unknown;
   /**
-   * Attach the caller's Clerk session token. Server-side only — `auth()` reads
-   * the request via Next's async context and is unavailable in the browser.
+   * Attach the caller's session token from its httpOnly cookie. Server-side
+   * only: `cookies()` reads the request via Next's async context and is
+   * unavailable in the browser — deliberately, since the token must never be
+   * reachable from client-side JavaScript.
    */
   authenticated?: boolean;
 }
@@ -90,16 +93,17 @@ export async function apiFetch<T>(
 }
 
 /**
- * The Clerk session token for the current server request.
+ * The session token for the current server request, from its httpOnly cookie.
  *
  * Returns null rather than throwing when called outside a request context, so a
  * component rendered at build time degrades to "not signed in" instead of
- * failing the build.
+ * failing the build — which is exactly what happens during  when
+ * Next collects page data.
  */
 async function getSessionToken(): Promise<string | null> {
   try {
-    const { getToken } = await auth();
-    return await getToken();
+    const store = await cookies();
+    return store.get(SESSION_COOKIE_NAME)?.value ?? null;
   } catch {
     return null;
   }

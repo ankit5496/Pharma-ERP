@@ -1,58 +1,85 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
+import {
+  AUTH_ROUTES,
+  PLATFORM_ROUTES,
+  PLATFORM_SESSION_COOKIE_NAME,
+  SESSION_COOKIE_NAME,
+} from '@pharma-erp/types';
+
+/** Reachable without a session. Everything else requires one. */
+const PUBLIC_PATHS = new Set<string>([AUTH_ROUTES.login]);
 
 /**
- * Routes reachable without signing in. Everything else requires a session —
- * the default is protected, so a new page is covered the moment it is added and
- * has to be listed here deliberately to be exposed.
+ * A cheap edge gate: is there a session cookie at all.
+ *
+ * Deliberately does NOT validate the token. Verifying a signature or calling
+ * the API here would run on every request including assets, and the middleware
+ * cannot see whether the account has since been disabled anyway. Real
+ * enforcement happens in two places that can be trusted: `requireSession()` in
+ * each protected page, and the API's guard, which re-reads the account from
+ * Postgres on every request.
+ *
+ * So this exists purely to avoid rendering a page that is certain to redirect.
+ * A forged or expired cookie gets past it and is rejected one hop later.
  */
-const isPublicRoute = createRouteMatcher([
-  '/sign-in(.*)',
-  '/sign-up(.*)',
-  // Next's own error pages, so a signed-out 404 does not become a redirect loop.
-  '/_not-found',
-]);
-
-/**
- * Routes a signed-in user may reach before they have a company. Onboarding
- * obviously, plus sign-out, which must always work.
- */
-const isPreOnboardingRoute = createRouteMatcher(['/onboarding(.*)']);
-
-export default clerkMiddleware(async (auth, request) => {
-  const { userId, redirectToSignIn } = await auth();
+export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  if (isPublicRoute(request)) {
-    // A signed-in user landing on sign-in/sign-up has no business there.
-    if (userId && (pathname.startsWith('/sign-in') || pathname.startsWith('/sign-up'))) {
-      return NextResponse.redirect(new URL('/dashboard', request.url));
+  // The sign-out handlers must always run, with or without a session. They are
+  // how an INVALID cookie gets cleared, and gating them on having a session
+  // would recreate the exact deadlock they exist to break.
+  if (pathname === '/logout' || pathname === '/platform/logout') {
+    return NextResponse.next();
+  }
+
+  // The root decides for itself. It is the only page that inspects BOTH session
+  // cookies, so gating it on the tenant cookie here would send a platform
+  // operator to a tenant sign-in page for an account they do not have.
+  if (pathname === '/') {
+    return NextResponse.next();
+  }
+
+  // The platform console is a separate surface with its own cookie, so it gets
+  // its own gate. Without this branch the tenant check below would bounce a
+  // Super User to the tenant login, which is not an account they have.
+  if (pathname.startsWith('/platform')) {
+    const hasPlatformSession = Boolean(request.cookies.get(PLATFORM_SESSION_COOKIE_NAME)?.value);
+
+    if (pathname === PLATFORM_ROUTES.login) {
+      return hasPlatformSession
+        ? NextResponse.redirect(new URL(PLATFORM_ROUTES.dashboard, request.url))
+        : NextResponse.next();
+    }
+
+    return hasPlatformSession
+      ? NextResponse.next()
+      : NextResponse.redirect(new URL(PLATFORM_ROUTES.login, request.url));
+  }
+
+  const hasSession = Boolean(request.cookies.get(SESSION_COOKIE_NAME)?.value);
+
+  if (PUBLIC_PATHS.has(pathname)) {
+    if (hasSession) {
+      return NextResponse.redirect(new URL(AUTH_ROUTES.afterLogin, request.url));
     }
     return NextResponse.next();
   }
 
-  if (!userId) {
-    return redirectToSignIn({ returnBackUrl: request.url });
-  }
-
-  // Note what this middleware deliberately does NOT do: decide whether the user
-  // has a company. That answer lives in our Postgres, and reaching it needs a
-  // verified API call — too expensive for the edge, on every asset request.
-  // Instead each protected page loads the session via requireSession() and
-  // redirects to /onboarding itself. The middleware's job here is only "is there
-  // a Clerk session at all".
-  if (isPreOnboardingRoute(request)) {
-    return NextResponse.next();
+  if (!hasSession) {
+    const target = new URL(AUTH_ROUTES.login, request.url);
+    // Preserved so a deep link survives sign-in. Only the path and query are
+    // kept — taking the whole URL from the request would let an open-redirect
+    // parameter ride along.
+    if (pathname !== '/') target.searchParams.set('next', pathname);
+    return NextResponse.redirect(target);
   }
 
   return NextResponse.next();
-});
+}
 
 export const config = {
   matcher: [
-    // Skip Next internals and static files unless they appear in search params.
-    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
-    // Always run for API routes.
-    '/(api|trpc)(.*)',
+    // Skip Next internals and static assets.
+    '/((?!_next|favicon\\.ico|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
   ],
 };

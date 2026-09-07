@@ -14,7 +14,7 @@ const MAX_REQUEST_ID_LENGTH = 64;
  * Opens the async context for every request.
  *
  * This runs before guards, so it cannot know who the caller is — it only
- * establishes the store and the correlation id. ClerkAuthGuard fills in the
+ * establishes the store and the correlation id. JwtAuthGuard fills in the
  * tenant, user and role once it has verified the token.
  *
  * Middleware rather than an interceptor, because Nest runs interceptors *after*
@@ -31,7 +31,7 @@ export class RequestContextMiddleware implements NestMiddleware {
       tenantId: null,
       userId: null,
       role: null,
-      externalAuthId: null,
+      mustChangePassword: false,
     };
 
     res.setHeader('x-request-id', context.requestId);

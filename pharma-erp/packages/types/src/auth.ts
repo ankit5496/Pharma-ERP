@@ -1,14 +1,14 @@
 import type { UserRole } from './roles';
 
 /**
- * The authenticated user as the web app sees them, returned by `GET /api/v1/me`.
+ * The authenticated user as the web app sees them, returned by `GET /api/v1/me`
+ * and by a successful sign-in.
  *
- * Note what is NOT here: no token, no Clerk id, no password material. The web
- * app never needs the Clerk subject, and putting it in a response body would
- * only invite it into logs.
+ * Note what is absent: no password hash, no token. The hash must never leave
+ * the API, and the token is delivered as an httpOnly cookie the browser cannot
+ * read rather than in a response body.
  */
 export interface SessionUser {
-  /** Our own User.id (UUID), not the Clerk user id. */
   id: string;
   email: string;
   fullName: string;
@@ -16,44 +16,105 @@ export interface SessionUser {
   tenantId: string;
   tenantName: string;
   tenantSlug: string;
-  /** INVITED users have signed in but not yet been activated by an Admin. */
-  status: 'INVITED' | 'ACTIVE' | 'DISABLED';
+  status: UserAccountStatus;
+  /**
+   * True after an Admin created the account or reset the password. While set,
+   * every route except change-password is refused — an admin-chosen password is
+   * a shared secret until the user replaces it.
+   */
+  mustChangePassword: boolean;
+}
+
+export type UserAccountStatus = 'INVITED' | 'ACTIVE' | 'DISABLED';
+
+// ---------------------------------------------------------------------------
+// Sign-in
+// ---------------------------------------------------------------------------
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  user: SessionUser;
+  /**
+   * Bearer token for the API. The web app puts this straight into an httpOnly
+   * cookie and never exposes it to client-side JavaScript.
+   */
+  accessToken: string;
+  /** Seconds until `accessToken` expires. */
+  expiresInSeconds: number;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
 }
 
 /**
- * Response of `GET /api/v1/me`.
+ * Password rules, shared so the form and the API agree on what is acceptable
+ * rather than the user discovering the real rule on submit.
  *
- * The `onboarded: false` case is the crux of the signup flow: a Clerk session
- * can exist before any Tenant does (the user has just registered and has not
- * created their company yet). Modelling that as a valid response rather than a
- * 401 lets the web app route them to /onboarding instead of bouncing them back
- * to sign-in in a loop.
+ * Length over composition classes, deliberately: NIST SP 800-63B advises
+ * against mandatory character-class rules, which push people toward
+ * `Passw0rd!` and no further.
  */
-export type SessionResponse =
-  { onboarded: true; user: SessionUser } | { onboarded: false; reason: 'NO_TENANT' | 'DISABLED' };
+export const PASSWORD_MIN_LENGTH = 12;
+export const PASSWORD_MAX_LENGTH = 128;
 
-/** Request body of `POST /api/v1/onboarding/company`. */
-export interface CreateCompanyRequest {
-  /** Registered name of the manufacturing company. */
-  companyName: string;
-  /** URL-safe tenant identifier; unique across the platform. */
-  slug: string;
-  /** Full name of the person signing up — they become the tenant's Admin. */
+export const PASSWORD_RULE_TEXT = `At least ${PASSWORD_MIN_LENGTH} characters. A passphrase of a few words is stronger than a short password with symbols.`;
+
+// ---------------------------------------------------------------------------
+// Admin user management
+// ---------------------------------------------------------------------------
+
+/** Body of `POST /api/v1/users` — an Admin creating a colleague. */
+export interface CreateUserRequest {
+  email: string;
   fullName: string;
-  /** Manufacturing licence number; optional at signup, required before batch release. */
-  drugLicenceNumber?: string;
-  gstin?: string;
-  /** IANA timezone, e.g. "Asia/Kolkata". */
-  timezone?: string;
+  /** Assigned by the Admin. Never chosen by the user being created. */
+  role: UserRole;
+  phone?: string;
+  /**
+   * Temporary password, communicated to the user out of band. They are forced
+   * to replace it on first sign-in.
+   */
+  temporaryPassword: string;
 }
 
-export interface CreateCompanyResponse {
-  tenantId: string;
-  tenantSlug: string;
-  userId: string;
-  /** Always ADMIN — the first user of a tenant provisions it and owns it. */
-  role: Extract<UserRole, 'ADMIN'>;
+/** Body of `PATCH /api/v1/users/:id`. Every field optional. */
+export interface UpdateUserRequest {
+  fullName?: string;
+  phone?: string;
+  role?: UserRole;
+  /** ACTIVE or DISABLED. Use the delete endpoint to soft-delete instead. */
+  status?: Extract<UserAccountStatus, 'ACTIVE' | 'DISABLED'>;
 }
+
+/** Body of `POST /api/v1/users/:id/reset-password`. */
+export interface ResetPasswordRequest {
+  temporaryPassword: string;
+}
+
+/** A row in the Admin's user list. */
+export interface UserListItem {
+  id: string;
+  email: string;
+  fullName: string;
+  phone: string | null;
+  role: UserRole;
+  status: UserAccountStatus;
+  mustChangePassword: boolean;
+  lastLoginAt: string | null;
+  /** True while a failed-login lockout is in force. */
+  isLocked: boolean;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Feature areas
+// ---------------------------------------------------------------------------
 
 /**
  * Feature areas of the application. Used to decide what a role may see; the
@@ -77,9 +138,9 @@ export type AppModule = (typeof APP_MODULES)[number];
  * Which modules each role can open. MANAGEMENT sees everything but writes
  * nothing — see READ_ONLY_ROLES in ./roles.
  *
- * This is deliberately data rather than a pile of conditionals: the API guard
- * and the web navigation read the same table, so a role cannot end up with a
- * menu item it is not allowed to use.
+ * Deliberately data rather than a pile of conditionals: the API guard and the
+ * web navigation read the same table, so a role cannot end up with a menu item
+ * it is not allowed to use.
  */
 export const ROLE_MODULES: Record<UserRole, readonly AppModule[]> = {
   ADMIN: [...APP_MODULES],
@@ -92,26 +153,31 @@ export const ROLE_MODULES: Record<UserRole, readonly AppModule[]> = {
   ACCOUNTANT: ['dashboard', 'accounts', 'purchase', 'sales'],
 };
 
-/** Where a role lands after signing in. */
-export const ROLE_LANDING_PATH: Record<UserRole, string> = {
-  ADMIN: '/dashboard',
-  MANAGEMENT: '/dashboard',
-  PURCHASE_MANAGER: '/dashboard',
-  STORE_OFFICER: '/dashboard',
-  PRODUCTION_OFFICER: '/dashboard',
-  QUALITY_OFFICER: '/dashboard',
-  SALES_MANAGER: '/dashboard',
-  ACCOUNTANT: '/dashboard',
-};
+/** Only these roles may create, edit or disable users. */
+export const USER_MANAGEMENT_ROLES: readonly UserRole[] = ['ADMIN'];
 
 export function canAccessModule(role: UserRole, appModule: AppModule): boolean {
   return ROLE_MODULES[role].includes(appModule);
 }
 
+export function canManageUsers(role: UserRole): boolean {
+  return USER_MANAGEMENT_ROLES.includes(role);
+}
+
 /** Auth-related route paths, shared so the web middleware and API agree. */
 export const AUTH_ROUTES = {
-  signIn: '/sign-in',
-  signUp: '/sign-up',
-  onboarding: '/onboarding',
-  afterSignOut: '/sign-in',
+  login: '/login',
+  changePassword: '/change-password',
+  afterLogin: '/dashboard',
+  afterLogout: '/login',
 } as const;
+
+/** Name of the httpOnly cookie holding the API access token. */
+export const SESSION_COOKIE_NAME = 'pharma_erp_session';
+
+/**
+ * Scope stamped on a tenant access token. The platform equivalent lives in
+ * ./platform. Both guards check it, so a token minted for one surface is
+ * refused by the other deliberately rather than by accident.
+ */
+export const TENANT_TOKEN_SCOPE = 'tenant';
