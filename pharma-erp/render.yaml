@@ -113,10 +113,21 @@ services:
       # at runtime. Changing either of these requires a rebuild, not a restart —
       # Render does rebuild on an env var change, so this is handled, but it is
       # why a "just restart it" fix will not pick up a new value.
+      # `host` is a bare hostname with no scheme — Render exposes no property
+      # that includes one — so readApiUrl() in apps/web/src/lib/env.ts accepts a
+      # hostname and assumes https.
       - key: NEXT_PUBLIC_API_URL
         fromService:
           name: pharma-erp-api
           type: web
           property: host
       - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+
+      # The web app is NOT purely a browser client: clerkMiddleware(), auth()
+      # and currentUser() all run on the server and verify sessions against
+      # Clerk, which needs the secret key. Omitting it here does not fail the
+      # build — it throws on the first request, as a 500 with no obvious cause.
+      # Use the same value as the API service.
+      - key: CLERK_SECRET_KEY
         sync: false
