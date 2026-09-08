@@ -46,7 +46,7 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
       </aside>
 
       <main className="flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
-        <div className="w-full max-w-md">{children}</div>
+        <div className="w-full max-w-lg">{children}</div>
       </main>
     </div>
   );

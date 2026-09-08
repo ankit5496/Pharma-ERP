@@ -31,7 +31,7 @@ function makeStore(role: UserRole | null): RequestContext {
     tenantId: role ? 'e6a1b0c2-1111-4222-8333-444455556666' : null,
     userId: role ? 'a1b2c3d4-5555-4666-8777-888899990000' : null,
     role,
-    externalAuthId: 'user_clerk_test',
+    mustChangePassword: false,
   };
 }
 
@@ -121,7 +121,7 @@ describe('RolesGuard', () => {
   });
 
   it('passes a pre-onboarding request through — there is no role to check yet', () => {
-    // ClerkAuthGuard has already decided whether a tenantless request may reach
+    // JwtAuthGuard has already decided whether a tenantless request may reach
     // this route; with no role there is no role decision to make, and no
     // tenant-scoped data reachable either.
     const guard = makeGuard({ role: null });

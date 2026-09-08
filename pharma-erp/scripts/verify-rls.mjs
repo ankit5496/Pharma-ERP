@@ -25,7 +25,8 @@ import {
   createPrismaClient,
   createProvisioningClient,
   forTenant,
-  resolveIdentityByExternalAuthId,
+  findLoginCandidateByEmail,
+  resolveIdentityByUserId,
   runInTenantTransaction,
 } from '@pharma-erp/database';
 
@@ -95,12 +96,12 @@ const suffix = randomUUID().slice(0, 8);
 const alpha = {
   id: randomUUID(),
   slug: `zz-verify-alpha-${suffix}`,
-  subject: `verify_alpha_${suffix}`,
+  email: `admin@zz-verify-alpha-${suffix}.test`,
 };
 const beta = {
   id: randomUUID(),
   slug: `zz-verify-beta-${suffix}`,
-  subject: `verify_beta_${suffix}`,
+  email: `admin@zz-verify-beta-${suffix}.test`,
 };
 
 const admin = createProvisioningClient(MIGRATION_DATABASE_URL);
@@ -122,8 +123,14 @@ async function seed() {
       const user = await tx.user.create({
         data: {
           tenantId: tenant.id,
-          externalAuthId: tenant.subject,
-          email: `admin@${tenant.slug}.test`,
+          email: tenant.email,
+          // A syntactically-shaped but unusable hash. These accounts are never
+          // signed in to, and a null hash would make them INVITED-shaped, which
+          // would skew the login-lookup assertions below. No real password
+          // produces this value, so it cannot be authenticated against.
+          passwordHash: ['', 'argon2id', 'v=19', 'm=19456,t=2,p=1', 'unusable', 'unusable'].join(
+            '$',
+          ),
           fullName: `Admin ${tenant.slug}`,
           role: 'ADMIN',
           status: 'ACTIVE',
@@ -394,27 +401,62 @@ async function main() {
     auditTriggers.map((t) => t.name).join(',') || 'none',
   );
 
-  section('Auth bootstrap policy');
-  const identity = await resolveIdentityByExternalAuthId(app, alpha.subject);
+  section('Login lookup policy');
+  // Sign-in arrives with an email and no tenant, and the tenant is what the
+  // lookup is trying to discover — so one narrow SELECT policy exists for it.
+  // Unlike the previous external-provider version, the key here is an
+  // unauthenticated string typed at a login form, which is why these
+  // assertions matter more than they used to.
+  const candidate = await findLoginCandidateByEmail(app, alpha.email);
   check(
-    'a verified subject resolves to its user, tenant and role with no tenant set',
-    identity?.tenantId === alpha.id && identity?.role === 'ADMIN',
-    identity ? `${identity.email} / ${identity.role}` : 'null',
+    'an email resolves to its account, tenant and role with no tenant set',
+    candidate?.tenantId === alpha.id && candidate?.role === 'ADMIN',
+    candidate ? `${candidate.email} / ${candidate.role}` : 'null',
   );
 
-  const unknown = await resolveIdentityByExternalAuthId(app, `nobody_${suffix}`);
-  check('an unknown subject resolves to null', unknown === null);
+  const unknown = await findLoginCandidateByEmail(app, `nobody-${suffix}@nowhere.test`);
+  check('an unknown email resolves to null', unknown === null);
+
+  check(
+    'the lookup is case-insensitive on the address',
+    (await findLoginCandidateByEmail(app, alpha.email.toUpperCase()))?.tenantId === alpha.id,
+  );
 
   // The policy must not become a cross-tenant read primitive: with a tenant
-  // already set, the other tenant's subject must change nothing.
+  // already set, another tenant's address must change nothing.
   const notWidened = await runInTenantTransaction(app, alpha.id, async (tx) => {
-    await tx.$executeRaw`SELECT set_config('app.current_external_auth_id', ${beta.subject}, true)`;
+    await tx.$executeRaw`SELECT set_config('app.current_login_email', ${beta.email}, true)`;
     return tx.user.findMany({ select: { email: true } });
   });
   check(
-    'the bootstrap policy cannot widen an already-scoped query',
-    notWidened.length === 1 && notWidened[0].email === `admin@${alpha.slug}.test`,
+    'the login policy cannot widen an already-scoped query',
+    notWidened.length === 1 && notWidened[0].email === alpha.email,
     notWidened.map((r) => r.email).join(','),
+  );
+
+  // A login lookup must expose the ONE row for the address and nothing else —
+  // not the other tenant's users, and not a whole-table read.
+  const scopedToOneRow = await app.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.current_login_email', ${alpha.email}, true)`;
+    return tx.user.findMany({ select: { email: true } });
+  });
+  check(
+    'the login policy exposes exactly one row, not the table',
+    scopedToOneRow.length === 1 && scopedToOneRow[0].email === alpha.email,
+    `${scopedToOneRow.length} row(s)`,
+  );
+
+  section('Identity re-read on every request');
+  // This is what makes revoking a role or disabling an account take effect
+  // immediately rather than at token expiry.
+  const reread = await resolveIdentityByUserId(app, alpha.id, alpha.userId);
+  check('a user id + tenant resolves to the live account', reread?.email === alpha.email);
+
+  const crossTenantToken = await resolveIdentityByUserId(app, beta.id, alpha.userId);
+  check(
+    'a token naming one tenant cannot resolve another tenant’s user',
+    crossTenantToken === null,
+    crossTenantToken ? 'LEAKED' : 'null',
   );
 
   section('Provisioning without a superuser');

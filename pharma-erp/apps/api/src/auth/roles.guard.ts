@@ -18,7 +18,7 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 /**
  * Enforces `@Roles(...)` and the platform-wide read-only rule.
  *
- * Runs after ClerkAuthGuard (guard order follows registration order), so the
+ * Runs after JwtAuthGuard (guard order follows registration order), so the
  * request context already carries a resolved role.
  *
  * Two independent checks:
@@ -48,9 +48,9 @@ export class RolesGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
     const role = this.tenantContext.get()?.role;
 
-    // No role yet means the caller is authenticated but pre-onboarding, which
-    // ClerkAuthGuard has already decided is acceptable for this route. There is
-    // no role to check, and no tenant data to reach.
+    // No role means no authenticated user on this route — JwtAuthGuard has
+    // already allowed it as @Public. There is no role to check, and no
+    // tenant-scoped data reachable.
     if (!role) return true;
 
     if (READ_ONLY_ROLES.includes(role) && MUTATING_METHODS.has(request.method.toUpperCase())) {

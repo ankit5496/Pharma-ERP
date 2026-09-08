@@ -424,6 +424,22 @@ If no service exists, start the cluster directly (adjust version and data direct
 & "C:\Program Files\PostgreSQL\18\bin\pg_ctl.exe" -D "C:\Program Files\PostgreSQL\18\data" -l "$env:TEMP\pg.log" start
 ```
 
+#### Keeping it running across reboots
+
+A PostgreSQL installed without a Windows service does not restart with the machine, and the failure is confusing rather than obvious: the API validates its database connection at boot and exits, so the web app keeps serving pages while every request that touches data fails. You get a login screen that refuses to log you in.
+
+```powershell
+pnpm dev:db          # start it if it is down; no-op if it is already up
+```
+
+To stop needing that, register it as a service once from an **Administrator** shell:
+
+```powershell
+.scriptsdev-db.ps1 -Register
+```
+
+The script refuses without elevation rather than failing halfway through.
+
 `pnpm verify:rls` will tell you whether the setup is correct — in particular whether the app role really is non-superuser, which is the part that silently makes RLS decorative if you get it wrong.
 
 ---
@@ -510,6 +526,7 @@ Treat it as temporary and ask your provider for a second role.
 
 | Symptom                                                    | Cause                                                                                                    | Fix                                                                                                                      |
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Login page loads but sign-in fails with `fetch failed`     | PostgreSQL is down, so the API exited at boot while the web app kept serving                             | `pnpm dev:db`, then restart `pnpm dev`                                                                                   |
 | Dashboard shows "Could not reach the API"                  | API not running, or port mismatch                                                                        | `pnpm dev`; check `NEXT_PUBLIC_API_URL` matches `API_PORT`                                                               |
 | `/health` reports database `down`                          | Postgres not up, or migrations not applied                                                               | `docker compose up -d && pnpm db:migrate`                                                                                |
 | `password authentication failed for user "pharma_app"`     | The container's data volume predates the init script                                                     | `docker compose down -v && docker compose up -d && pnpm db:migrate`                                                      |

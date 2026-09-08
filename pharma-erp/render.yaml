@@ -9,7 +9,7 @@
 #   1. Run scripts/render-bootstrap.sql against the new database. It creates the
 #      least-privilege `pharma_app` role that the API connects as. Without it,
 #      DATABASE_URL has nothing to point at.
-#   2. Fill in the secrets marked `sync: false` below (Clerk keys, and the
+#   2. Fill in the secrets marked sync:false below (JWT_SECRET and the
 #      pharma_app connection string). Render deliberately will not let a
 #      blueprint carry secrets.
 #
@@ -37,7 +37,11 @@ services:
     plan: starter
     region: oregon # keep the database and both services in one region
     branch: main
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @pharma-erp/database db:generate && pnpm --filter @pharma-erp/api build
+    # The project lives in a subfolder of the repository, so every command runs
+    # from here. Omit it and paths resolve one directory too high, which surfaces
+    # as "Cannot find module .../apps/api/dist/main.js" at start-up.
+    rootDir: pharma-erp
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm turbo run build --filter=@pharma-erp/api
     startCommand: node apps/api/dist/main.js
     # Migrations run once per deploy, before the new instance takes traffic.
     # Requires a paid instance type; on the free tier, run `pnpm db:migrate:deploy`
@@ -67,22 +71,18 @@ services:
       - key: DATABASE_URL
         sync: false
 
-      # Lets the web app's origin through CORS without hardcoding the URL.
+      # Still set, though CORS is no longer load-bearing: the browser talks only
+      # to the web origin and Next.js forwards to the API server-side, so there is
+      # no cross-origin request to permit. Kept for direct API clients.
       - key: WEB_ORIGIN
         fromService:
           name: pharma-erp-web
           type: web
           property: host
-      # Rejects a validly-signed Clerk token minted for any other site.
-      - key: CLERK_AUTHORIZED_PARTIES
-        fromService:
-          name: pharma-erp-web
-          type: web
-          property: host
-
-      - key: CLERK_SECRET_KEY
-        sync: false
-      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+      # HMAC key for signing access tokens. Set it by hand to 48 random bytes:
+      #   node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+      # Changing it signs every user out immediately.
+      - key: JWT_SECRET
         sync: false
 
       - key: APP_VERSION
@@ -97,9 +97,13 @@ services:
     plan: starter
     region: oregon
     branch: main
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @pharma-erp/web build
+    # The project lives in a subfolder of the repository, so every command runs
+    # from here. Omit it and paths resolve one directory too high, which surfaces
+    # as "Cannot find module .../apps/api/dist/main.js" at start-up.
+    rootDir: pharma-erp
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm turbo run build --filter=@pharma-erp/web
     startCommand: pnpm --filter @pharma-erp/web start
-    healthCheckPath: /sign-in
+    healthCheckPath: /login
     autoDeploy: true
     envVars:
       - key: NODE_ENV
@@ -121,13 +125,3 @@ services:
           name: pharma-erp-api
           type: web
           property: host
-      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-        sync: false
-
-      # The web app is NOT purely a browser client: clerkMiddleware(), auth()
-      # and currentUser() all run on the server and verify sessions against
-      # Clerk, which needs the secret key. Omitting it here does not fail the
-      # build — it throws on the first request, as a 500 with no obvious cause.
-      # Use the same value as the API service.
-      - key: CLERK_SECRET_KEY
-        sync: false

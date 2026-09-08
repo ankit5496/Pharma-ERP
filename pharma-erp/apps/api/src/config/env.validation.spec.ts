@@ -6,8 +6,7 @@ const VALID = {
   DATABASE_URL: 'postgresql://pharma_app:pw@localhost:5432/pharma_erp?schema=public',
   MIGRATION_DATABASE_URL: 'postgresql://postgres:pw@localhost:5432/pharma_erp?schema=public',
   WEB_ORIGIN: 'http://localhost:3000',
-  CLERK_SECRET_KEY: 'sk_test_abc123',
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_abc123',
+  JWT_SECRET: 'a'.repeat(48),
 };
 
 describe('validateEnv', () => {
@@ -18,7 +17,7 @@ describe('validateEnv', () => {
     expect(result.NODE_ENV).toBe(NodeEnvironment.Development);
   });
 
-  it.each(['DATABASE_URL', 'MIGRATION_DATABASE_URL', 'CLERK_SECRET_KEY'])(
+  it.each(['DATABASE_URL', 'MIGRATION_DATABASE_URL', 'JWT_SECRET'])(
     'refuses to start when %s is missing',
     (key) => {
       const raw: Record<string, unknown> = { ...VALID };
@@ -28,94 +27,55 @@ describe('validateEnv', () => {
     },
   );
 
-  it('rejects a port outside the valid range', () => {
-    expect(() => validateEnv({ ...VALID, API_PORT: '70000' })).toThrow(/API_PORT/);
-  });
-
   it('rejects an unknown NODE_ENV rather than silently defaulting', () => {
     expect(() => validateEnv({ ...VALID, NODE_ENV: 'staging' })).toThrow(/NODE_ENV/);
   });
 
-  describe('Clerk keys', () => {
-    it('rejects a secret key that is not a Clerk secret key', () => {
-      // A publishable key pasted into the secret slot is a common copy-paste
-      // slip, and it would otherwise fail later as unexplained 401s.
-      expect(() => validateEnv({ ...VALID, CLERK_SECRET_KEY: 'pk_test_abc123' })).toThrow(
-        /CLERK_SECRET_KEY/,
-      );
+  describe('listen port', () => {
+    it('rejects a port outside the valid range', () => {
+      expect(() => validateEnv({ ...VALID, API_PORT: '70000' })).toThrow(/API_PORT/);
     });
 
-    it('rejects a publishable key that is not a Clerk publishable key', () => {
-      expect(() =>
-        validateEnv({ ...VALID, NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'sk_test_abc123' }),
-      ).toThrow(/NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY/);
+    it('prefers the platform PORT over API_PORT', () => {
+      // A host that injects PORT has already bound and health-checked it, so
+      // binding API_PORT instead means the deploy never turns healthy.
+      const result = validateEnv({ ...VALID, PORT: '10000', API_PORT: '4000' });
+
+      expect(result.API_PORT).toBe(10_000);
     });
 
-    it('rejects a mismatched test/live key pair', () => {
-      // The two keys must come from one Clerk instance; otherwise the browser
-      // mints tokens the API cannot verify, with no obvious clue why.
-      expect(() =>
-        validateEnv({
-          ...VALID,
-          CLERK_SECRET_KEY: 'sk_live_abc123',
-          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_abc123',
-        }),
-      ).toThrow(/Clerk key mismatch/);
-    });
-
-    it('accepts a matched live key pair in production', () => {
-      const result = validateEnv({
-        ...VALID,
-        NODE_ENV: 'production',
-        CLERK_SECRET_KEY: 'sk_live_abc123',
-        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_live_abc123',
-      });
-
-      expect(result.NODE_ENV).toBe(NodeEnvironment.Production);
-    });
-
-    it('refuses to start in production with test keys', () => {
-      expect(() => validateEnv({ ...VALID, NODE_ENV: 'production' })).toThrow(
-        /production with Clerk TEST keys/,
-      );
-    });
-
-    it('allows test keys in production only with the explicit opt-out', () => {
-      // Staging runs NODE_ENV=production against a Clerk development instance,
-      // so the rule has to be escapable — but only deliberately.
-      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-
-      const result = validateEnv({
-        ...VALID,
-        NODE_ENV: 'production',
-        ALLOW_CLERK_TEST_KEYS: 'true',
-      });
-
-      expect(result.NODE_ENV).toBe(NodeEnvironment.Production);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Clerk TEST keys'));
-
-      warn.mockRestore();
-    });
-
-    it.each(['false', 'no', '0', ''])('still refuses when the opt-out is %p', (value) => {
-      expect(() =>
-        validateEnv({ ...VALID, NODE_ENV: 'production', ALLOW_CLERK_TEST_KEYS: value }),
-      ).toThrow(/production with Clerk TEST keys/);
+    it('falls back to API_PORT when PORT is absent', () => {
+      expect(validateEnv({ ...VALID, API_PORT: '4100' }).API_PORT).toBe(4100);
     });
   });
 
-  describe('authorized parties', () => {
-    it('is optional and left unset when absent', () => {
-      expect(validateEnv({ ...VALID }).CLERK_AUTHORIZED_PARTIES).toBeUndefined();
+  describe('JWT_SECRET', () => {
+    it('rejects a secret shorter than 32 characters', () => {
+      // A short HMAC key is brute-forceable offline from one captured token,
+      // and forging a token means impersonating any user in any tenant.
+      expect(() => validateEnv({ ...VALID, JWT_SECRET: 'too-short' })).toThrow(/JWT_SECRET/);
     });
 
-    it('is carried through when provided', () => {
-      const result = validateEnv({
-        ...VALID,
-        CLERK_AUTHORIZED_PARTIES: 'https://erp.example.com,https://staging.example.com',
-      });
+    it('accepts a 32-character secret', () => {
+      expect(validateEnv({ ...VALID, JWT_SECRET: 'b'.repeat(32) }).JWT_SECRET).toHaveLength(32);
+    });
+  });
 
-      expect(result.CLERK_AUTHORIZED_PARTIES).toContain('erp.example.com');
+  describe('SESSION_TTL_SECONDS', () => {
+    it('defaults to eight hours', () => {
+      expect(validateEnv({ ...VALID }).SESSION_TTL_SECONDS).toBe(28_800);
+    });
+
+    it('is coerced from a string', () => {
+      expect(validateEnv({ ...VALID, SESSION_TTL_SECONDS: '3600' }).SESSION_TTL_SECONDS).toBe(3600);
+    });
+
+    it.each(['60', '200000'])('rejects an out-of-range value (%s)', (value) => {
+      // Too short makes the app unusable mid-task; too long defeats the point
+      // of a short-lived token in the first place.
+      expect(() => validateEnv({ ...VALID, SESSION_TTL_SECONDS: value })).toThrow(
+        /SESSION_TTL_SECONDS/,
+      );
     });
   });
 });

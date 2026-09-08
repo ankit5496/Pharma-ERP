@@ -17,7 +17,7 @@ import type { RequestContext } from '@pharma-erp/types';
  *
  * The store is filled in two stages, which is why RequestContext is mutable:
  * the middleware creates it with a request id before anything is known about
- * the caller, and ClerkAuthGuard fills in the identity once the token has been
+ * the caller, and JwtAuthGuard fills in the identity once the token has been
  * verified. Entering a new store from the guard instead would put the guard and
  * the controller in different contexts.
  */
@@ -39,7 +39,7 @@ export class TenantContextService {
    * The current tenant id, or a 500 if there is none.
    *
    * A 500 rather than a 401 on purpose: by the time anything asks for the
-   * tenant, ClerkAuthGuard has already rejected an unauthenticated request and
+   * tenant, JwtAuthGuard has already rejected an unauthenticated request and
    * refused a tenantless one on any route not marked `@AllowNoTenant`. Reaching
    * here without a tenant therefore means a route is misconfigured or the work
    * escaped the request scope — a server bug, not a client one.

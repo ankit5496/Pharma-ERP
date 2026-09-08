@@ -1,7 +1,8 @@
 // =============================================================================
 // Pharma ERP — Prisma schema
 // =============================================================================
-// Scope of this file today: Tenant, User and AuditLog only. The rest of the
+// Scope of this file today: the tenant layer (Tenant, User, AuditLog), and the
+// platform layer (PlatformUser, PlatformAuditLog) that sits outside it. The
 // domain (Item, Party, Bom, Batch, purchase/production/sales) lands
 // incrementally, flow by flow.
 //
@@ -110,23 +111,55 @@ model Tenant {
 // User
 // -----------------------------------------------------------------------------
 
-/// A person who signs in. Authentication itself is delegated to an external
-/// provider (not yet chosen/wired): `externalAuthId` is the join key to that
-/// provider's user record, and no password material is ever stored here.
+/// A person who signs in, belonging to exactly one Tenant.
+///
+/// The tenant is assigned by whoever creates the account — an Admin creating a
+/// colleague, or the platform creating a company's first Admin — and is never
+/// supplied by a client request. Platform staff are NOT in this table; see
+/// PlatformUser.
 model User {
   id       String @id @default(uuid()) @db.Uuid
   tenantId String @map("tenant_id") @db.Uuid
 
-  /// Subject id from the auth provider. Null until the invited user first
-  /// completes sign-in.
-  externalAuthId String? @unique @map("external_auth_id") @db.VarChar(255)
-
-  email    String  @db.VarChar(320)
+  /// Login identifier. Globally unique, not per-tenant: sign-in takes only an
+  /// email and a password, so it has to identify exactly one account. The cost
+  /// is that one address cannot hold accounts at two companies — acceptable for
+  /// a closed, admin-provisioned system, and the alternative (asking for a
+  /// company alongside the email at every login) is worse for the far more
+  /// common case. Always stored lowercased; see the citext-style constraint in
+  /// the migration.
+  email    String  @unique @db.VarChar(320)
   fullName String  @map("full_name") @db.VarChar(255)
   phone    String? @db.VarChar(32)
 
   role   UserRole
+  /// INVITED = created but no password set, cannot sign in.
+  /// ACTIVE  = can sign in. DISABLED = revoked by an administrator.
   status UserStatus @default(INVITED)
+
+  // ---------------------------------------------------------------------------
+  // Credentials
+  // ---------------------------------------------------------------------------
+
+  /// argon2id hash. Null while the account is INVITED. Never leaves the API —
+  /// every read of this model for response purposes uses an explicit `select`.
+  passwordHash String? @map("password_hash") @db.VarChar(255)
+
+  /// When the current password was set. Feeds password-age reporting, which
+  /// 21 CFR Part 11 §11.300(b) expects to be evidenced.
+  passwordSetAt DateTime? @map("password_set_at") @db.Timestamptz(6)
+
+  /// Set when an Admin creates the account or resets the password. While true,
+  /// every route except change-password is refused — an admin-chosen password
+  /// is a shared secret until the user replaces it.
+  mustChangePassword Boolean @default(true) @map("must_change_password")
+
+  /// Consecutive failed sign-ins; reset to 0 on success. Drives lockedUntil.
+  failedLoginAttempts Int @default(0) @map("failed_login_attempts")
+
+  /// Sign-in is refused until this passes. Throttles online password guessing
+  /// without an admin having to intervene.
+  lockedUntil DateTime? @map("locked_until") @db.Timestamptz(6)
 
   lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(6)
 
@@ -137,8 +170,8 @@ model User {
   tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   auditLogs AuditLog[]
 
-  /// Email is unique per tenant, not globally: the same person may legitimately
-  /// hold accounts at two companies on the platform.
+  /// Retained alongside the global unique on `email` so a tenant's user list
+  /// can be scanned by address without touching the global index.
   @@unique([tenantId, email])
   @@index([tenantId, role])
   @@index([tenantId, deletedAt])
@@ -186,4 +219,89 @@ model AuditLog {
   @@index([tenantId, entityType, entityId, createdAt])
   @@index([tenantId, userId, createdAt])
   @@map("audit_logs")
+}
+
+// -----------------------------------------------------------------------------
+// Platform layer — deliberately OUTSIDE the tenant model
+// -----------------------------------------------------------------------------
+
+/// A platform operator: the vendor's own staff, who create customer companies
+/// and their first Admin.
+///
+/// A separate table from `User` rather than a SUPER_ADMIN role, for one decisive
+/// reason: an Admin must never see platform staff in their user management. With
+/// a separate table that is true structurally — the Admin's queries run against
+/// `users` and cannot reach here — instead of depending on every future query
+/// remembering to filter a role out. It also keeps `users.tenant_id` NOT NULL,
+/// which every RLS policy in this database relies on.
+///
+/// Not tenant-scoped, so it has no RLS policies. Isolation comes from
+/// privileges instead: the runtime role `pharma_app` is REVOKEd on this table
+/// entirely, so a request-scoped connection gets "permission denied" rather than
+/// an empty result. Only the provisioning connection can read or write it.
+model PlatformUser {
+  id String @id @default(uuid()) @db.Uuid
+
+  email    String  @unique @db.VarChar(320)
+  fullName String  @map("full_name") @db.VarChar(255)
+  phone    String? @db.VarChar(32)
+
+  status PlatformUserStatus @default(ACTIVE)
+
+  /// argon2id hash. Same policy and parameters as tenant users.
+  passwordHash       String?   @map("password_hash") @db.VarChar(255)
+  passwordSetAt      DateTime? @map("password_set_at") @db.Timestamptz(6)
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until") @db.Timestamptz(6)
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz(6)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  auditLogs PlatformAuditLog[]
+
+  @@index([deletedAt])
+  @@map("platform_users")
+}
+
+enum PlatformUserStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// Append-only trail for platform-level actions: a Super User signing in,
+/// creating a company, suspending one.
+///
+/// Separate from `AuditLog` because that table's `tenant_id` is NOT NULL and
+/// its policies are tenant-scoped — correct for tenant activity, but a Super
+/// User signing in belongs to no tenant. Widening `AuditLog` would have meant
+/// making the column nullable and loosening every policy that depends on it.
+model PlatformAuditLog {
+  id BigInt @id @default(autoincrement())
+
+  /// Acting platform user. Null for the CLI, which has no session — honest
+  /// attribution beats inventing one.
+  platformUserId String? @map("platform_user_id") @db.Uuid
+
+  action     String  @db.VarChar(64)
+  entityType String  @map("entity_type") @db.VarChar(64)
+  entityId   String? @map("entity_id") @db.VarChar(64)
+
+  /// Snapshot of what changed. Never contains credentials.
+  detailsJson Json? @map("details_json")
+
+  requestId String? @map("request_id") @db.VarChar(64)
+  ipAddress String? @map("ip_address") @db.Inet
+  userAgent String? @map("user_agent") @db.VarChar(512)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  platformUser PlatformUser? @relation(fields: [platformUserId], references: [id], onDelete: Restrict)
+
+  @@index([createdAt])
+  @@index([platformUserId, createdAt])
+  @@map("platform_audit_logs")
 }

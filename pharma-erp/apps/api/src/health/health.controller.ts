@@ -9,7 +9,7 @@ import { HealthService } from './health.service';
 
 /**
  * Unauthenticated liveness/readiness surface. @Public is what makes it
- * reachable without a Clerk session; the global guard would reject it otherwise.
+ * reachable without a session; the global guard would reject it otherwise.
  *
  * The response never carries connection strings or stack traces: it is public.
  */

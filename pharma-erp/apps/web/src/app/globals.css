@@ -11,3 +11,65 @@
     @apply bg-slate-50 text-slate-900 antialiased;
   }
 }
+
+/**
+ * Form controls.
+ *
+ * Defined once here rather than repeated inline, because getting them wrong is
+ * invisible until someone tries to type. Tailwind's Preflight resets form
+ * elements with `border-width: 0` and `padding: 0`, so a class list like
+ * `rounded-md border-slate-300` sets a border COLOUR on a border that has no
+ * WIDTH — the box renders completely borderless and cramped. Worse, with no
+ * `focus:outline-none` the browser falls back to its own default focus outline,
+ * which is a hard black rectangle in Chrome. That is the entire reason these
+ * fields were invisible until clicked and then sprouted a black edge.
+ *
+ * So: state the border width explicitly, state the padding explicitly, and
+ * always replace the UA outline with a ring rather than just removing it.
+ */
+@layer components {
+  /* Light surfaces: the tenant app and its sign-in page. */
+  .field {
+    @apply block w-full rounded-md border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition-colors placeholder:text-slate-400 hover:border-slate-400 focus:border-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900/15 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500;
+  }
+
+  /* Dark surfaces: the platform console. A lighter border than the panel it
+     sits on, or the box disappears into the background exactly as before. */
+  .field-dark {
+    @apply block w-full rounded-md border border-slate-600 bg-slate-900/60 px-3.5 py-2.5 text-sm text-slate-100 shadow-sm transition-colors placeholder:text-slate-500 hover:border-slate-500 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/25 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500;
+  }
+
+  /* Compact variants, for controls that sit inline inside a table row where a
+     full-height field would stretch the row. Still fully bordered. */
+  .field-sm {
+    @apply rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 shadow-sm transition-colors hover:border-slate-400 focus:border-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900/15 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400;
+  }
+
+  .field-dark-sm {
+    @apply rounded-md border border-slate-600 bg-slate-900/60 px-2.5 py-1.5 text-xs text-slate-100 shadow-sm transition-colors hover:border-slate-500 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/25 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500;
+  }
+
+  /* A select keeps its native arrow, which would otherwise crowd the value at
+     the right-hand padding edge. */
+  select.field,
+  select.field-dark {
+    @apply pr-10;
+  }
+
+  .field-label {
+    @apply block text-sm font-medium text-slate-700;
+  }
+
+  .field-label-dark {
+    @apply block text-sm font-medium text-slate-300;
+  }
+
+  /* Field-level help and error text, so spacing under a field is consistent. */
+  .field-hint {
+    @apply mt-1.5 text-xs text-slate-500;
+  }
+
+  .field-hint-dark {
+    @apply mt-1.5 text-xs text-slate-400;
+  }
+}
