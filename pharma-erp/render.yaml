@@ -9,9 +9,18 @@
 #   1. Run scripts/render-bootstrap.sql against the new database. It creates the
 #      least-privilege `pharma_app` role that the API connects as. Without it,
 #      DATABASE_URL has nothing to point at.
-#   2. Fill in the secrets marked sync:false below (JWT_SECRET and the
-#      pharma_app connection string). Render deliberately will not let a
-#      blueprint carry secrets.
+#   2. Set DATABASE_URL — the one remaining sync:false variable. It is the
+#      `pharma_app` connection string from step 1, which only you can assemble,
+#      so Render cannot supply it. JWT_SECRET no longer needs a manual value:
+#      Render generates it (see the note on that key).
+#
+# If the API deploy crash-loops on "Invalid environment configuration", read the
+# variable name in that error and set it here — the API validates its whole
+# environment before starting, on purpose, so a missing secret is a refusal to
+# boot rather than a runtime failure once users are on it. Note the second-order
+# symptom: a service that never binds a port has no instance, so Render's edge
+# answers requests to it with a "no-server" 404 or a 429, neither of which
+# mentions configuration.
 #
 # Why DATABASE_URL is not wired with `fromDatabase`: Render's generated
 # connection string is for the database OWNER. The API must connect as a
@@ -79,11 +88,25 @@ services:
           name: pharma-erp-web
           type: web
           property: host
-      # HMAC key for signing access tokens. Set it by hand to 48 random bytes:
+      # HMAC key for signing access tokens.
+      #
+      # generateValue rather than sync:false, because sync:false leaves the
+      # variable EMPTY until someone fills it in, and the API fail-fasts without
+      # it — the deploy then crash-loops, never binds a port, and Render's edge
+      # answers requests for a service with no instance (a "no-server" 404, or a
+      # 429), which looks nothing like a missing environment variable. Letting
+      # Render generate a value removes that whole failure mode: there is no
+      # manual step left to forget.
+      #
+      # Render generates a 256-bit random value, comfortably over the 32-character
+      # minimum env.validation.ts enforces. It is generated once, on creation, and
+      # is never overwritten afterwards — including if it was already set by hand.
+      #
+      # To rotate it, change it in the dashboard. Rotating signs every user out
+      # immediately, because existing tokens no longer verify. To set one by hand:
       #   node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-      # Changing it signs every user out immediately.
       - key: JWT_SECRET
-        sync: false
+        generateValue: true
 
       - key: APP_VERSION
         value: '0.1.0'
