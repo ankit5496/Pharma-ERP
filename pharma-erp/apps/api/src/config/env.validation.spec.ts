@@ -78,4 +78,69 @@ describe('validateEnv', () => {
       );
     });
   });
+  describe('loopback database URLs in production', () => {
+    // The VALID fixture is deliberately all-localhost, which is correct for
+    // development — so most of these cases differ from it only by NODE_ENV.
+    const PROD_HOSTS = {
+      DATABASE_URL: 'postgresql://pharma_app:pw@dpg-abc123-a:5432/pharma_erp?sslmode=require',
+      MIGRATION_DATABASE_URL:
+        'postgresql://pharma_erp_owner:pw@dpg-abc123-a:5432/pharma_erp?sslmode=require',
+    };
+
+    it('allows loopback outside production', () => {
+      expect(() => validateEnv({ ...VALID, NODE_ENV: 'development' })).not.toThrow();
+      expect(() => validateEnv({ ...VALID, NODE_ENV: 'test' })).not.toThrow();
+    });
+
+    it('accepts real hosts in production', () => {
+      expect(() => validateEnv({ ...VALID, ...PROD_HOSTS, NODE_ENV: 'production' })).not.toThrow();
+    });
+
+    it.each([
+      ['localhost', 'postgresql://u:p@localhost:5432/db'],
+      ['127.0.0.1', 'postgresql://u:p@127.0.0.1:5432/db'],
+      ['0.0.0.0', 'postgresql://u:p@0.0.0.0:5432/db'],
+      ['::1', 'postgresql://u:p@[::1]:5432/db'],
+    ])('rejects MIGRATION_DATABASE_URL pointing at %s in production', (_host, url) => {
+      // This is the one that used to boot healthy and then fail on the first
+      // platform sign-in, because only /platform uses this connection.
+      expect(() =>
+        validateEnv({
+          ...VALID,
+          ...PROD_HOSTS,
+          NODE_ENV: 'production',
+          MIGRATION_DATABASE_URL: url,
+        }),
+      ).toThrow(/MIGRATION_DATABASE_URL points at/);
+    });
+
+    it('rejects DATABASE_URL pointing at loopback in production', () => {
+      expect(() =>
+        validateEnv({
+          ...VALID,
+          ...PROD_HOSTS,
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
+        }),
+      ).toThrow(/DATABASE_URL points at localhost/);
+    });
+
+    it('names both when both are wrong', () => {
+      const run = () => validateEnv({ ...VALID, NODE_ENV: 'production' });
+
+      expect(run).toThrow(/DATABASE_URL points at/);
+      expect(run).toThrow(/MIGRATION_DATABASE_URL points at/);
+    });
+
+    it('leaves an unparseable URL to Prisma rather than guessing', () => {
+      expect(() =>
+        validateEnv({
+          ...VALID,
+          ...PROD_HOSTS,
+          NODE_ENV: 'production',
+          DATABASE_URL: 'not a url at all',
+        }),
+      ).not.toThrow();
+    });
+  });
 });

@@ -160,7 +160,63 @@ export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables 
     );
   }
 
+  assertDatabaseHostsAreNotLoopback(config);
+
   return config;
+}
+
+/** Hosts that cannot possibly be a managed database from inside a container. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0']);
+
+/**
+ * In production, refuses a database URL pointing at loopback.
+ *
+ * Both DATABASE_URL and MIGRATION_DATABASE_URL were previously checked only for
+ * emptiness, which let a value copied out of a local .env pass the boot and fail
+ * later — and the two connections fail at different moments, which is what makes
+ * this worth a dedicated check. DATABASE_URL is exercised by /health/ready, so a
+ * bad value shows up as a failed deploy. MIGRATION_DATABASE_URL is used at
+ * runtime by exactly one area, /platform, so a bad value boots healthy and then
+ * surfaces as "Internal server error" the first time an operator signs in —
+ * with the real reason (`Can't reach database server at localhost:5432`) visible
+ * only in the service log.
+ *
+ * Not applied outside production, where loopback is the correct value.
+ */
+function assertDatabaseHostsAreNotLoopback(config: EnvironmentVariables): void {
+  if (config.NODE_ENV !== NodeEnvironment.Production) return;
+
+  const offenders: string[] = [];
+
+  for (const key of ['DATABASE_URL', 'MIGRATION_DATABASE_URL'] as const) {
+    const value = config[key];
+
+    let host: string;
+
+    try {
+      // A Postgres URL is URL-parseable; hostname strips any port and brackets.
+      host = new URL(value).hostname.toLowerCase();
+    } catch {
+      // Not parseable, so nothing to assert. Emptiness is already covered, and
+      // Prisma gives a better message for a malformed URL than this could.
+      continue;
+    }
+
+    if (LOOPBACK_HOSTS.has(host)) offenders.push(`${key} points at ${host}`);
+  }
+
+  if (offenders.length === 0) return;
+
+  throw new Error(
+    `Refusing to start: a database URL points at this container, not at your database.\n` +
+      offenders.map((o) => `  - ${o}\n`).join('') +
+      `\n  A deployed container has no database on localhost. Set these to the\n` +
+      `  database's INTERNAL connection string (Render: Dashboard -> your\n` +
+      `  Postgres instance -> Connections -> Internal Database URL).\n\n` +
+      `  DATABASE_URL must use the least-privilege application role, or\n` +
+      `  row-level security does not apply to it and tenant isolation is lost.\n` +
+      `  MIGRATION_DATABASE_URL is the owner connection.`,
+  );
 }
 
 /**
