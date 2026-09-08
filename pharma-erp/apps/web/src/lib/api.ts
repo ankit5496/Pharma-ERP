@@ -10,6 +10,59 @@ export type ApiResult<T> =
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
+/**
+ * How often to retry a request that never reached the API, and how long to wait
+ * between attempts (multiplied by the attempt number, so 300ms, 600ms, 900ms).
+ *
+ * Sized from this project's measured restart time: an incremental
+ * `nest start --watch` rebuild logs "File change detected" and is listening
+ * again 1-2s later. A 900ms budget was tried first and was too short to cover
+ * that, so the total is ~1.8s across four attempts.
+ *
+ * Deliberately not longer. This delay is also paid on every page load when the
+ * API is genuinely down, and a page that fails in under two seconds is far more
+ * useful than one that hangs while retrying something that will not recover.
+ */
+const CONNECTION_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 300;
+
+/**
+ * Methods that may be retried after a connection was established and then
+ * broke. A GET can always be repeated; a POST cannot, because the server may
+ * have already acted on it.
+ */
+const REPLAYABLE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The OS-level error code behind a failed fetch, or null if this was not a
+ * connection failure.
+ *
+ * undici throws a bare `TypeError: fetch failed` and puts the real reason on
+ * `cause`. With a hostname that resolves to several addresses — `localhost` is
+ * both ::1 and 127.0.0.1 — `cause` is an AggregateError whose `errors` hold one
+ * failure per address; its own `code` is set when they agree, so prefer it and
+ * fall back to the first entry.
+ */
+function connectionErrorCode(error: unknown): string | null {
+  if (!(error instanceof Error) || !(error.cause instanceof Error)) return null;
+
+  const cause = error.cause as Error & { code?: string; errors?: unknown };
+
+  if (cause.code) return cause.code;
+
+  if (Array.isArray(cause.errors)) {
+    for (const entry of cause.errors) {
+      const code: unknown = (entry as { code?: unknown } | null)?.code;
+
+      if (typeof code === 'string') return code;
+    }
+  }
+
+  return null;
+}
+
 interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   timeoutMs?: number;
   /** Serialised as JSON with the appropriate content type. */
@@ -52,64 +105,87 @@ export async function apiFetch<T>(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  // AbortSignal.timeout rather than a manual controller + setTimeout: it cannot
-  // leak a pending timer if the request settles first.
-  const signal = init.signal ?? AbortSignal.timeout(timeoutMs);
+  const method = (init.method ?? 'GET').toUpperCase();
+  const body = json === undefined ? undefined : JSON.stringify(json);
 
-  try {
-    const response = await fetch(url, {
-      ...init,
-      signal,
-      headers,
-      body: json === undefined ? undefined : JSON.stringify(json),
-      // Anything behind a session is per-user and must never be shared from a
-      // cache. Callers that want caching should say so explicitly.
-      cache: init.cache ?? 'no-store',
-    });
+  let lastError: unknown;
+  let lastCode: string | null = null;
 
-    if (!response.ok) {
-      return { ok: false, status: response.status, error: await readErrorMessage(response) };
+  for (let attempt = 0; ; attempt++) {
+    // A fresh timeout per attempt, and AbortSignal.timeout rather than a manual
+    // controller + setTimeout: it cannot leak a pending timer if the request
+    // settles first. Reusing one signal across attempts would mean the second
+    // attempt inherits an already-spent budget.
+    const signal = init.signal ?? AbortSignal.timeout(timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        ...init,
+        signal,
+        headers,
+        body,
+        // Anything behind a session is per-user and must never be shared from a
+        // cache. Callers that want caching should say so explicitly.
+        cache: init.cache ?? 'no-store',
+      });
+
+      if (!response.ok) {
+        return { ok: false, status: response.status, error: await readErrorMessage(response) };
+      }
+
+      // 204 and friends have no body to parse.
+      if (response.status === 204) return { ok: true, data: undefined as T };
+
+      return { ok: true, data: (await response.json()) as T };
+    } catch (error) {
+      lastError = error;
+
+      // Not retried: the server may still be working on it, and the caller set
+      // this budget deliberately.
+      if (error instanceof DOMException && error.name === 'TimeoutError') break;
+
+      lastCode = connectionErrorCode(error);
+
+      // ECONNREFUSED means no connection was ever established, so the API
+      // cannot have seen the request — safe to repeat whatever the method.
+      // ECONNRESET means it was established and then broke, so a POST may
+      // already have been acted on; only replay the safe methods.
+      const worthRetrying =
+        lastCode === 'ECONNREFUSED' ||
+        ((lastCode === 'ECONNRESET' || lastCode === 'EAI_AGAIN') && REPLAYABLE_METHODS.has(method));
+
+      // A caller-supplied signal owns its own lifecycle; retrying behind its
+      // back would outlive whatever it is tied to.
+      if (!worthRetrying || attempt >= CONNECTION_RETRIES || init.signal) break;
+
+      await sleep(RETRY_BASE_DELAY_MS * (attempt + 1));
     }
+  }
 
-    // 204 and friends have no body to parse.
-    if (response.status === 204) return { ok: true, data: undefined as T };
-
-    return { ok: true, data: (await response.json()) as T };
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'TimeoutError') {
-      return {
-        ok: false,
-        status: null,
-        error: `Timed out after ${timeoutMs}ms — is the API running? (${url})`,
-      };
-    }
-
-    // undici throws a bare `TypeError: fetch failed` and puts the real reason on
-    // `cause`. Reporting only the message is untriageable: "fetch failed" reads
-    // identically whether the API is down, mid-restart, or the hostname is
-    // wrong. In dev the common case is the third: `nest start --watch` bounces
-    // the API whenever packages/types or packages/database is rebuilt, and a
-    // page loaded in that window sees a refused connection.
-    const cause =
-      error instanceof Error && error.cause instanceof Error
-        ? (error.cause as Error & { code?: string })
-        : undefined;
-
-    if (cause?.code) {
-      const hint =
-        cause.code === 'ECONNREFUSED' || cause.code === 'ECONNRESET'
-          ? ' — the API is not accepting connections (starting up, restarting, or not running)'
-          : '';
-
-      return { ok: false, status: null, error: `${cause.code}${hint} — ${url}` };
-    }
-
+  if (lastError instanceof DOMException && lastError.name === 'TimeoutError') {
     return {
       ok: false,
       status: null,
-      error: error instanceof Error ? `${error.message} — ${url}` : `Unknown error — ${url}`,
+      error: `Timed out after ${timeoutMs}ms — is the API running? (${url})`,
     };
   }
+
+  // Report the OS-level code, not undici's bare "fetch failed", which reads
+  // identically whether the API is down, mid-restart, or the hostname is wrong.
+  if (lastCode) {
+    const hint =
+      lastCode === 'ECONNREFUSED' || lastCode === 'ECONNRESET'
+        ? ' — the API is not accepting connections (starting up, restarting, or not running)'
+        : '';
+
+    return { ok: false, status: null, error: `${lastCode}${hint} — ${url}` };
+  }
+
+  return {
+    ok: false,
+    status: null,
+    error: lastError instanceof Error ? `${lastError.message} — ${url}` : `Unknown error — ${url}`,
+  };
 }
 
 /**
