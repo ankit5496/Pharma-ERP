@@ -84,6 +84,26 @@ export async function apiFetch<T>(
       };
     }
 
+    // undici throws a bare `TypeError: fetch failed` and puts the real reason on
+    // `cause`. Reporting only the message is untriageable: "fetch failed" reads
+    // identically whether the API is down, mid-restart, or the hostname is
+    // wrong. In dev the common case is the third: `nest start --watch` bounces
+    // the API whenever packages/types or packages/database is rebuilt, and a
+    // page loaded in that window sees a refused connection.
+    const cause =
+      error instanceof Error && error.cause instanceof Error
+        ? (error.cause as Error & { code?: string })
+        : undefined;
+
+    if (cause?.code) {
+      const hint =
+        cause.code === 'ECONNREFUSED' || cause.code === 'ECONNRESET'
+          ? ' — the API is not accepting connections (starting up, restarting, or not running)'
+          : '';
+
+      return { ok: false, status: null, error: `${cause.code}${hint} — ${url}` };
+    }
+
     return {
       ok: false,
       status: null,
