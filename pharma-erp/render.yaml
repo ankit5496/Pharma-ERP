@@ -148,3 +148,13 @@ services:
           name: pharma-erp-api
           type: web
           property: host
+
+      # Server-to-server address for the API, over Render private networking.
+      # apiFetch is its only reader and is server-only, so the API never needs
+      # to be reached publicly from here. Going out through the public hostname
+      # makes every page render a round trip through the edge, which rate-limits
+      # it and then answers 429 to this very service.
+      #
+      # Confirm the port against the API log line "API listening on port".
+      - key: API_URL
+        value: http://pharma-erp-api:10000
