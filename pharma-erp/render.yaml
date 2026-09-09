@@ -41,7 +41,7 @@ services:
   # API — NestJS
   # ---------------------------------------------------------------------------
   - type: web
-    name: Pharma-ERP
+    name: pharma-erp
     runtime: node
     plan: starter
     region: oregon # keep the database and both services in one region
@@ -145,7 +145,7 @@ services:
       # hostname and assumes https.
       - key: NEXT_PUBLIC_API_URL
         fromService:
-          name: Pharma-ERP
+          name: pharma-erp
           type: web
           property: host
 
