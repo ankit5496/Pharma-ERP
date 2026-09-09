@@ -29,9 +29,9 @@
 # used for MIGRATION_DATABASE_URL only.
 
 databases:
-  - name: pharma-erp-db
-    databaseName: pharma_erp
-    user: pharma_erp_owner
+  - name: pharma-erp-main-db
+    databaseName: pharma_erp_main_db
+    user: pharma_erp_main_db_user
     plan: basic-256mb
     postgresMajorVersion: '16'
     ipAllowList: [] # only reachable from inside Render's network
@@ -41,7 +41,7 @@ services:
   # API — NestJS
   # ---------------------------------------------------------------------------
   - type: web
-    name: pharma-erp-api
+    name: Pharma-ERP
     runtime: node
     plan: starter
     region: oregon # keep the database and both services in one region
@@ -71,7 +71,7 @@ services:
       # RLS blocks for the application role by design).
       - key: MIGRATION_DATABASE_URL
         fromDatabase:
-          name: pharma-erp-db
+          name: pharma-erp-main-db
           property: connectionString
 
       # The RUNTIME connection, as `pharma_app`. Set this by hand after running
@@ -145,7 +145,7 @@ services:
       # hostname and assumes https.
       - key: NEXT_PUBLIC_API_URL
         fromService:
-          name: pharma-erp-api
+          name: Pharma-ERP
           type: web
           property: host
 
@@ -155,17 +155,10 @@ services:
       # makes every page render a round trip through the edge, which rate-limits
       # it and then answers 429 to this very service.
       #
-      # THE HOSTNAME IS THE API SERVICE’S OWN NAME, lowercased — not a fixed
-      # string. It matches `name:` on the API service above only when the
-      # services were created by this blueprint. A service created by hand in
-      # the dashboard carries whatever name was typed there, so a deployment
-      # whose API service is called "Pharma-ERP" needs http://pharma-erp:10000
-      # instead, and this value must be corrected on the web service to match.
-      # There is no `fromService` property that yields a private address, so it
-      # cannot be wired automatically.
-      #
-      # Confirm the port against the API log line "API listening on port".
-      # A wrong hostname surfaces as EAI_AGAIN or ENOTFOUND naming API_URL,
-      # which readApiUrl and apiFetch both report by variable name.
+      # The hostname is the API service’s own name, lowercased, and the port is
+      # the one it logs at start-up ("API listening on port"). No `fromService`
+      # property yields a private address, so it cannot be wired automatically —
+      # if you rename the API service, change this too. A mismatch shows up as
+      # EAI_AGAIN or ENOTFOUND naming API_URL.
       - key: API_URL
-        value: http://pharma-erp-api:10000
+        value: http://pharma-erp:10000
