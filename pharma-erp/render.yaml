@@ -41,7 +41,7 @@ services:
   # API — NestJS
   # ---------------------------------------------------------------------------
   - type: web
-    name: pharma-erp-api
+    name: pharma-erp
     runtime: node
     plan: starter
     region: oregon # keep the database and both services in one region
@@ -145,7 +145,7 @@ services:
       # hostname and assumes https.
       - key: NEXT_PUBLIC_API_URL
         fromService:
-          name: pharma-erp-api
+          name: pharma-erp
           type: web
           property: host
 
@@ -167,5 +167,6 @@ services:
       # Confirm the port against the API log line "API listening on port".
       # A wrong hostname surfaces as EAI_AGAIN or ENOTFOUND naming API_URL,
       # which readApiUrl and apiFetch both report by variable name.
+      # Confirm the port against the API log line "API listening on port".
       - key: API_URL
         value: http://pharma-erp-api:10000
