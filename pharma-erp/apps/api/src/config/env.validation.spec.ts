@@ -132,15 +132,78 @@ describe('validateEnv', () => {
       expect(run).toThrow(/MIGRATION_DATABASE_URL points at/);
     });
 
-    it('leaves an unparseable URL to Prisma rather than guessing', () => {
+    it('leaves a postgres URL it cannot parse to Prisma rather than guessing', () => {
+      // Well-formed enough to pass the protocol check, but `new URL()` cannot
+      // parse it — an unterminated IPv6 bracket. The loopback guard has no
+      // hostname to judge, and Prisma reports a malformed URL better than a
+      // guess here would.
       expect(() =>
         validateEnv({
           ...VALID,
           ...PROD_HOSTS,
           NODE_ENV: 'production',
-          DATABASE_URL: 'not a url at all',
+          DATABASE_URL: 'postgresql://u:p@[unterminated',
         }),
       ).not.toThrow();
+    });
+  });
+  describe('malformed database URLs', () => {
+    // These are checked in every environment, so NODE_ENV stays at the
+    // fixture's 'development' throughout.
+    it.each([
+      ['surrounding quotes', '"postgresql://u:p@host:5432/db"'],
+      ['a leading space', ' postgresql://u:p@host:5432/db'],
+      ['a trailing newline is fine, a leading one is not', '\npostgresql://u:p@host:5432/db'],
+      ['the psql command instead of the URL', 'psql postgresql://u:p@host:5432/db'],
+      ['a bare hostname', 'dpg-abc123-a/pharma_erp'],
+      ['mysql', 'mysql://u:p@host:3306/db'],
+    ])('rejects MIGRATION_DATABASE_URL with %s', (_why, value) => {
+      // MIGRATION_DATABASE_URL specifically, because Prisma reports a malformed
+      // override against schema.prisma's env("DATABASE_URL") line — naming the
+      // one variable that is not at fault.
+      expect(() => validateEnv({ ...VALID, MIGRATION_DATABASE_URL: value })).toThrow(
+        /MIGRATION_DATABASE_URL does not start with postgresql:\/\//,
+      );
+    });
+
+    it('rejects a malformed DATABASE_URL too', () => {
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: 'not-a-url' })).toThrow(
+        /DATABASE_URL does not start with postgresql:\/\//,
+      );
+    });
+
+    it('names both when both are malformed', () => {
+      const run = () =>
+        validateEnv({ ...VALID, DATABASE_URL: 'nope', MIGRATION_DATABASE_URL: 'also-nope' });
+
+      expect(run).toThrow(/DATABASE_URL does not start with/);
+      expect(run).toThrow(/MIGRATION_DATABASE_URL does not start with/);
+    });
+
+    it('shows the offending value so an invisible character is visible', () => {
+      // A stray space or quote is the usual cause and is unreadable in a log
+      // line unless the value is quoted back.
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: ' postgresql://u:p@h/db' })).toThrow(
+        /received " postgresql/,
+      );
+    });
+
+    it('accepts the postgres:// spelling as well as postgresql://', () => {
+      expect(() =>
+        validateEnv({ ...VALID, DATABASE_URL: 'postgres://u:p@localhost:5432/db' }),
+      ).not.toThrow();
+    });
+
+    it('truncates a very long value rather than dumping a credential in full', () => {
+      const long = 'x'.repeat(200);
+
+      try {
+        validateEnv({ ...VALID, DATABASE_URL: long });
+        throw new Error('expected validateEnv to throw');
+      } catch (error) {
+        expect((error as Error).message).toContain('…');
+        expect((error as Error).message).not.toContain(long);
+      }
     });
   });
 });

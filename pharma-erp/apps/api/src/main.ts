@@ -8,6 +8,7 @@ import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from './app.module';
 import type { EnvironmentVariables } from './config/env.validation';
+import { VALIDATION_PIPE_OPTIONS } from './config/validation-pipe.options';
 
 async function bootstrap(): Promise<void> {
   // NOT bufferLogs: true. Buffering holds every log until the application
@@ -23,22 +24,7 @@ async function bootstrap(): Promise<void> {
   const port = config.get('API_PORT', { infer: true });
   const nodeEnv = config.get('NODE_ENV', { infer: true });
 
-  app.useGlobalPipes(
-    new ValidationPipe({
-      // Strip properties with no matching DTO decorator...
-      whitelist: true,
-      // ...and reject outright when the client sent unknown ones, rather than
-      // silently dropping them. A typo'd field name is a bug worth surfacing.
-      forbidNonWhitelisted: true,
-      // Turn plain JSON into DTO instances so @Type/@Transform run and
-      // path/query params arrive as numbers and dates, not strings.
-      transform: true,
-      transformOptions: { enableImplicitConversion: false },
-      // Don't leak DTO internals or constraint metadata in production responses.
-      disableErrorMessages: nodeEnv === 'production',
-      validationError: { target: false, value: false },
-    }),
-  );
+  app.useGlobalPipes(new ValidationPipe(VALIDATION_PIPE_OPTIONS));
 
   app.enableCors({
     origin: config

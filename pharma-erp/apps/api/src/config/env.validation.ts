@@ -160,9 +160,61 @@ export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables 
     );
   }
 
+  assertDatabaseUrlsAreWellFormed(config);
   assertDatabaseHostsAreNotLoopback(config);
 
   return config;
+}
+
+const DATABASE_URL_KEYS = ['DATABASE_URL', 'MIGRATION_DATABASE_URL'] as const;
+
+/**
+ * Rejects a database URL that is not a PostgreSQL URL at all.
+ *
+ * Worth its own check because of how badly this fails otherwise. Only
+ * DATABASE_URL is resolved from the schema's `env()`; MIGRATION_DATABASE_URL is
+ * passed to createProvisioningClient as a datasource OVERRIDE. Prisma validates
+ * the override but reports the failure against the datasource block in
+ * schema.prisma — so a malformed MIGRATION_DATABASE_URL produces:
+ *
+ *   Error validating datasource `db`: the URL must start with the protocol
+ *   `postgresql://` --> schema.prisma:30  url = env("DATABASE_URL")
+ *
+ * naming the one variable that is NOT at fault. It also surfaces on the first
+ * /platform request rather than at boot, because that is the only place the
+ * provisioning client is used — so the service looks healthy and tenant traffic
+ * works fine.
+ *
+ * Checked in every environment: a value that is not a postgres URL is wrong
+ * everywhere, unlike a loopback host.
+ */
+function assertDatabaseUrlsAreWellFormed(config: EnvironmentVariables): void {
+  const offenders: string[] = [];
+
+  for (const key of DATABASE_URL_KEYS) {
+    const value = config[key];
+
+    if (/^postgres(ql)?:\/\//.test(value)) continue;
+
+    // Quote the value so a stray quote, space or newline is visible rather than
+    // being invisible in a log line — those are exactly how this goes wrong when
+    // a URL is pasted into a hosting dashboard.
+    const preview = JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
+
+    offenders.push(`  - ${key} does not start with postgresql:// — received ${preview}`);
+  }
+
+  if (offenders.length === 0) return;
+
+  throw new Error(
+    `Refusing to start: a database URL is not a PostgreSQL connection string.\n` +
+      `${offenders.join('\n')}\n\n` +
+      `  It must begin exactly "postgresql://" (or "postgres://").\n` +
+      `  Common causes when pasting into a hosting dashboard:\n` +
+      `    - surrounding quotes: "postgresql://..." — the quotes are kept literally\n` +
+      `    - a leading or trailing space or newline\n` +
+      `    - pasting the psql COMMAND ("psql postgresql://...") instead of the URL`,
+  );
 }
 
 /** Hosts that cannot possibly be a managed database from inside a container. */
@@ -188,7 +240,7 @@ function assertDatabaseHostsAreNotLoopback(config: EnvironmentVariables): void {
 
   const offenders: string[] = [];
 
-  for (const key of ['DATABASE_URL', 'MIGRATION_DATABASE_URL'] as const) {
+  for (const key of DATABASE_URL_KEYS) {
     const value = config[key];
 
     let host: string;

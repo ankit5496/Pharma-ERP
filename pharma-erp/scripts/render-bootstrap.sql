@@ -140,9 +140,38 @@ BEGIN
 END
 $defaults$;
 
-GRANT EXECUTE ON FUNCTION public.current_tenant_id() TO pharma_app;
-GRANT EXECUTE ON FUNCTION public.require_tenant_id() TO pharma_app;
-GRANT EXECUTE ON FUNCTION public.current_external_auth_id() TO pharma_app;
+-- Granted per function, only if the function exists.
+--
+-- A plain GRANT on a missing function is an error, and with ON_ERROR_STOP the
+-- whole script aborts. That is not hypothetical: `current_external_auth_id`
+-- existed under the Clerk-era schema and is DROPped by migration
+-- 20260902000000_local_authentication, so a hardcoded grant on it fails on any
+-- database migrated past that point — while still being needed on one that is
+-- not. Listing both and skipping the absent one makes this script work at
+-- either schema version, which matters because it is run by hand, once, against
+-- a database whose exact state nobody has checked.
+DO $functions$
+DECLARE
+  v_function text;
+BEGIN
+  FOREACH v_function IN ARRAY ARRAY[
+    'current_tenant_id',        -- all versions
+    'require_tenant_id',        -- all versions
+    'current_login_email',      -- 20260902000000 onwards (self-hosted auth)
+    'current_external_auth_id'  -- Clerk-era only; dropped by 20260902000000
+  ]
+  LOOP
+    IF EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = v_function
+    ) THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.%I() TO pharma_app', v_function);
+    END IF;
+  END LOOP;
+END
+$functions$;
 
 -- -----------------------------------------------------------------------------
 -- 4. Verify
@@ -189,5 +218,5 @@ ORDER BY relname;
 --
 -- Then confirm the whole thing end to end with:
 --   pnpm verify:rls
--- pointed at this database. It asserts 25 properties and refuses to run if
+-- pointed at this database. It asserts tenant isolation end to end and refuses to run if
 -- DATABASE_URL and MIGRATION_DATABASE_URL are the same connection.
