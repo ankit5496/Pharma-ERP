@@ -155,6 +155,17 @@ services:
       # makes every page render a round trip through the edge, which rate-limits
       # it and then answers 429 to this very service.
       #
+      # THE HOSTNAME IS THE API SERVICE’S OWN NAME, lowercased — not a fixed
+      # string. It matches `name:` on the API service above only when the
+      # services were created by this blueprint. A service created by hand in
+      # the dashboard carries whatever name was typed there, so a deployment
+      # whose API service is called "Pharma-ERP" needs http://pharma-erp:10000
+      # instead, and this value must be corrected on the web service to match.
+      # There is no `fromService` property that yields a private address, so it
+      # cannot be wired automatically.
+      #
       # Confirm the port against the API log line "API listening on port".
+      # A wrong hostname surfaces as EAI_AGAIN or ENOTFOUND naming API_URL,
+      # which readApiUrl and apiFetch both report by variable name.
       - key: API_URL
         value: http://pharma-erp-api:10000
